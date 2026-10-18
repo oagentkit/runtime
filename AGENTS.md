@@ -1,81 +1,81 @@
 # AGENTS.md — oagentkit/runtime
 
-> Agent 进程运行时，6 个包：`breaker` `pacer` `progress` `procx` `hotplug` `hookx`
+> Agent 进程运行时——LLM token 流式节控/泛型事件总线/子进程最小环境/运行时热插拔/生命周期钩子
 > module：`github.com/oagentkit/runtime` · org：[oagentkit = Open Agent Kit](https://github.com/oagentkit)
-> 矩阵分层：**tier 0（基础层）**
+> 矩阵分层：**tier 0**（基础层，零仓内依赖或仅依赖同仓包）
 
 ## 本仓包含
 
 ```
-breaker/  hookx/  hotplug/  pacer/  procx/  progress/
+`pacer/`
+`progress/`
+`procx/`
+`hotplug/`
+`hookx/`
 ```
 
 ## 硬规则
 
 ### 分层与依赖
 
-- 依赖严格自底向上，**禁止反向依赖**。本仓是 tier 0，任何矩阵内模块都不得被本仓依赖。
-- 外部依赖仅 `github.com/oekit/concurrency`（只用其 `async`）。**不要在本仓重新实现
-  goroutine 池、单飞、重试、令牌桶、滑动窗口、时间轮** —— 那是 `oekit/concurrency` 的职责。
-
-### 与 oekit/concurrency 的边界
-
-| 能力 | 归属 |
-|---|---|
-| GoSafe / gopool / 单飞 / 重试 / 令牌桶 / 滑动窗口 / 时间轮 | `oekit/concurrency` |
-| 概率丢弃式自适应熔断 | `oekit/concurrency/breaker` |
-| **三态熔断 + 半开探针时限 + 陈旧探测失效** | 本仓 `breaker`（待退役） |
-| **LLM token 流式节控** | 本仓 `pacer` |
-| **泛型事件总线** | 本仓 `progress` |
-
-⚠️ **`progress` 语义与 `oekit/concurrency/progress` 相反**：
-上游是长任务**阶段进度追踪器**，本仓是**事件总线**。任何按包名对齐的迁移/退役判断都会做错。
-
-⚠️ **`pacer` 与 `oekit/concurrency/ratelimit` 语义不同**：
-`ratelimit` 是**准入控制**（允许发不允许），`pacer` 是**聚合缓冲**（攒够窗口再发）。
-不是同一语义，不要互相替代。
-
-### 并发安全
-
-- 禁止裸 `go func`：用 `github.com/oekit/concurrency/async` 的 GoSafe 系列（panic 被 recover）。
-- 共享状态用 mutex / atomic 保护；包级全局可变状态用 `atomic.Pointer[T]`。
-- `hotplug.Holder[T]` / `progress.Bus[T]` 这类泛型容器的并发正确性**必须**有 `-race`
-  回归测试兜底。
+- 依赖严格自底向上，**禁止反向依赖**。本仓是 tier 0，只允许依赖 tier ≤ 0 的仓。
+- 本仓无矩阵内依赖，可被任意层引用。
+- 改 module 路径必须同步：全部 import、go.mod、README 安装行。
 
 ### 错误处理
 
 - 一律使用 `github.com/oekit/pkg/errors`；业务错误用 BizError。
 - 所有 error 禁止 `_` 忽略。
 
-### 日志
+### 并发安全
 
-- **本仓不引入日志依赖**（tier 0 不该抬地板）。需要观测输出时返回 error 或交给调用方。
+- 禁止裸 `go func`：用 `github.com/oekit/concurrency/async` 的 GoSafe 系列（panic 被 recover）。
+- 共享状态用 mutex / atomic 保护；包级全局可变状态用 `atomic.Pointer[T]`。
 
 ### API 设计
 
 - 函数选项模式命名 `XxxOption`（禁止裸 `Option`，多包 co-import 会冲突）。
 - 导出符号 PascalCase + godoc 注释；包文档放 `doc.go`。
 
-### `procx` 的分层约束（硬）
+### 日志
 
-`procx` 被 tier1 的 `mcpkit`、`promptx` 使用，**因此必须留在 tier0**。
-任何把它并入 tier2 `tools` 仓的提议都会造成 tier1→tier2 分层倒挂，直接违反矩阵不变量。
+- **本仓不引入日志依赖。** tier0 加日志等于给所有下游抬地板；需要观测输出时返回 error 或交给调用方。
 
-## `breaker` 退役纪律
+## 仓特有纪律
 
-本包待退役到 `oekit/concurrency/breaker`，上游需求见
-https://github.com/oekit/concurrency/issues/17 。
+### `progress` 撞名但语义相反（最容易踩）
 
-- **在上游三项（代绑定 / 探测时限 / 冷却不被延长）落地前，不得删除本包** ——
-  消费方仍在 import，删了直接构建断裂。
-- 落地后：删本包 → 消费方改依赖上游 → 仓数不变，只减代码量。
+- `oekit/concurrency/progress` = 长任务**阶段进度追踪器**（`NewTracker`/`PhaseConfig`/`PhaseStatus`）
+- 本仓 `progress` = 泛型**事件总线**（`Bus[T]`，发布订阅 + 慢消费者丢弃计数）
+
+**任何按包名对齐的迁移/退役判断都会做错。对齐必须按语义。**
+
+### `pacer` ≠ `ratelimit`
+
+`oekit/concurrency/ratelimit` 是**准入控制**（允许发/不允许发），本仓 `pacer` 是**聚合缓冲**
+（攒够窗口再发）。不是同一语义，不要互相替代。
+
+### `procx` 的分层硬约束
+
+`procx` 被 tier1 的 `mcpkit`、`promptx` 使用，**必须留在 tier0**。
+把它并入 tier2 的 `tools` 会造成 tier1→tier2 分层倒挂，违反矩阵不变量。
+
+### `breaker` 已退役
+
+原三态熔断器已迁到 `oekit/concurrency/breaker`，由 `llm` 仓的准入适配层消费。
+本仓不再有熔断实现 —— **不要在本仓重新实现熔断**。
+
+上游已知缺口：`WithConsecutiveFailures` 只切状态、切不了放行决策
+（实测阈值 3、第 12 次才真正拒绝），见 https://github.com/oekit/concurrency/issues/25 。
+`llm` 侧用本地计数型准入否决兜底，上游修好后删掉那段即可。
 
 ## 明确不属于本仓的
 
 | 能力 | 归属 |
 |---|---|
 | 文本/差异/会话/报告 | `github.com/oagentkit/textx` |
-| 脱敏/出口围栏/权限/审计 | `github.com/oagentkit/guardx` |
-| 提示词组装/转向/文件状态 | `github.com/oagentkit/promptx` |
+| 事件总线/流控/子进程/热插拔/钩子 | `github.com/oagentkit/runtime` |
+| 脱敏/出口围栏/权限/沙箱解析/审计 | `github.com/oagentkit/guardx` |
 | DB 队列与选主 | `github.com/oagentkit/queue` |
 | 通用 errors/stringx/encoding/mathx | `github.com/oekit/pkg` |
+| goroutine 池/单飞/重试/令牌桶 | `github.com/oekit/concurrency` |
