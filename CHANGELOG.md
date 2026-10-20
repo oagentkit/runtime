@@ -4,11 +4,11 @@
 
 ## [v0.7.1] — 2026-10-20
 
-- [round-1] fix(go): tier0 基础包地板降到 go 1.24.0，CI go-version 同步到 1.24 (#3)
+- [round-1] fix(go): tier0 基础包地板降到 go 1.24.0，CI go-version 同步到 1.24
 
 ## [v0.7.0] — 2026-10-19
 
-- 杂务(deps)：依赖地板对齐远端最新（concurrency v0.17.1） (#13)
+- 杂务(deps)：依赖地板对齐远端最新（concurrency v0.17.1）
 
 ## [v0.6.0] — 2026-10-19
 
@@ -46,7 +46,7 @@ BREAKING：github.com/oagentkit/runtime/breaker 不再存在。迁移方
 （https://github.com/oekit/concurrency/issues/25），由 llm 仓的准入适配层兜底。
 门禁：go build / go vet / go test -race 5 包全绿，gofmt 干净。
 
-- 杂务(deps)：oekit 依赖升级 (#1)
+- 杂务(deps)：oekit 依赖升级
 - 杂务(deps)：oekit/concurrency v0.12.0 -> v0.13.1
 - 杂务(deps)：oekit/concurrency v0.6.0 -> v0.9.0
 
