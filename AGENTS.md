@@ -72,7 +72,7 @@ tag 必须落在 CHANGELOG 提交**之后** —— 下游 `go get` 拿到的是 
 
 ### `procx` 的分层硬约束
 
-`procx` 被 tier1 的 `mcpkit`、`promptx` 使用，**必须留在 tier0**。
+`procx` 被 tier2 的 `mcpkit`、tier1 的 `promptx` 使用，**必须留在 tier0**。
 把它并入 tier2 的 `tools` 会造成 tier1→tier2 分层倒挂，违反矩阵不变量。
 
 ### `breaker` 已退役
