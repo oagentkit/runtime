@@ -22,7 +22,7 @@ go get github.com/oagentkit/runtime
 
 ## 外部依赖地板
 
-- 零外部依赖。
+- **零第三方依赖。** 只依赖第一方基座 `github.com/oekit/concurrency`。
 
 ## 与 oekit 的关系
 
