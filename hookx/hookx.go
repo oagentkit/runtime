@@ -24,10 +24,10 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/oagentkit/runtime/procx"
+	"github.com/oekit/pkg/cache"
 )
 
 // DefaultTimeout 单 hook 执行预算（对标 ZCode 60s）。
@@ -137,7 +137,12 @@ func (r *Runner) Run(ctx context.Context, event Event, payload Input) RunResult 
 // eventsReCache 正则模式编译缓存（/…/ 形态）。matches 在每次事件派发的热
 // 路径上（pre_tool_use 每次工具调用都跑全部 hook），坏模式不缓存不匹配
 // （与原"编译失败即不匹配"行为一致）。
-var eventsReCache sync.Map // pattern → *regexp.Regexp
+//
+// 单飞去重：并发首次命中同一模式时只编译一次，其余请求共享结果。
+// TTL=0 ⇒ 永不过期，且不引入后台清扫 goroutine（与原 sync.Map 无常驻协程一致）。
+var eventsReCache = cache.NewSingleFlightCache(cache.NewLocalCache[regexp.Regexp](cache.LocalConfig[regexp.Regexp]{
+	NullTTL: -1, // 编译失败走 err 分支本就不写 null marker；显式禁用空值缓存，杜绝「查不到」被误当缓存事实
+}))
 
 func (h Hook) matches(event Event) bool {
 	pattern := strings.TrimSpace(h.Events)
@@ -145,15 +150,13 @@ func (h Hook) matches(event Event) bool {
 		return true
 	}
 	if strings.HasPrefix(pattern, "/") && strings.HasSuffix(pattern, "/") && len(pattern) > 2 {
-		v, ok := eventsReCache.Load(pattern)
-		if !ok {
-			compiled, err := regexp.Compile(pattern[1 : len(pattern)-1])
-			if err != nil {
-				return false
-			}
-			v, _ = eventsReCache.LoadOrStore(pattern, compiled)
+		re, err := eventsReCache.GetOrLoadWithSource(context.Background(), pattern, func(_ context.Context, p string) (*regexp.Regexp, error) {
+			return regexp.Compile(p[1 : len(p)-1])
+		})
+		if err != nil {
+			return false
 		}
-		return v.(*regexp.Regexp).MatchString(string(event))
+		return re.MatchString(string(event))
 	}
 	for _, name := range strings.Split(pattern, "|") {
 		if strings.TrimSpace(name) == string(event) {
