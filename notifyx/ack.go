@@ -75,7 +75,7 @@ func HTTPAckEndpoint(baseURL string) AckEndpoint {
 type PollAckOption func(*pollConfig)
 
 type pollConfig struct {
-	interval        time.Duration
+	interval            time.Duration
 	maxConsecutiveFails int
 }
 
