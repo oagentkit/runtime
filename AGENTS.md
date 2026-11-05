@@ -12,6 +12,7 @@
 `procx/`
 `hotplug/`
 `hookx/`
+`notifyx/`
 ```
 
 ## 硬规则
