@@ -13,6 +13,7 @@ go get github.com/oagentkit/runtime
 | `procx` | 子进程最小环境构造 `ChildEnv` + 执行封装，供 spawn 外部进程的包共用 |
 | `hotplug` | 运行时插拔与原子热替换：`Plugboard` 启停视图 + `Holder[T]` 快照持有点 |
 | `hookx` | 外部 hook 拦截协议：在关键拦截点派生子进程，stdin 喂 JSON |
+| `notifyx` | 生命周期事件通知出口：归一化事件契约 + 出站队列可靠外发（退避重试/超时/丢弃计数）+ 人工确认回执轮询 |
 
 ## 定位
 
