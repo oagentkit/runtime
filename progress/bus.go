@@ -54,6 +54,13 @@ func (b *Bus[T]) Publish(e T) {
 // cancel 与 ctx 结束双向收口：任一发生，监听 goroutine 都会退出——
 // 此前手动 cancel 只删 channel 不唤醒监听 goroutine，ctx 为 Background 时
 // 每个订阅者永久泄漏一个 goroutine + 一条残留 channel。
+//
+// ⚠️ channel **永不关闭**（oagentkit/runtime#20）：unsubscribe/ctx 结束只摘
+// 注册，不 close(ch)。消费方 for-range 必须自带退出分支（select ctx.Done() /
+// cancel 后退出），裸 `for range ch` 会永久阻塞。刻意不 close：Publish 在
+// 遍历 subs 时持的是 channel 引用，close 与并发 send 的竞窗（send on closed
+// channel panic）在无全局停顿的前提下不可消除——用阻塞风险换 panic 风险
+// 不划算，契约写明白交给消费方。
 func (b *Bus[T]) Subscribe(ctx context.Context) (<-chan T, func()) {
 	if b == nil {
 		return nil, func() {}
