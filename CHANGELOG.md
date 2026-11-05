@@ -2,6 +2,80 @@
 
 > 本文件由 `matrix-tools/scripts/gen_changelogs.py` 从 git 历史生成，按 tag 切段、取每段内的 conventional commit 渲染。
 
+## [v0.8.0] — 2026-11-06
+
+### 新增(notifyx)：生命周期事件通知出口——归一化契约 + 可靠外发 + 确认回执轮询
+
+* feat(notifyx): 生命周期事件通知出口——归一化契约 + 可靠外发 + 确认回执轮询（#18）
+runtime 已有 hookx（外部拦截→子进程，控制入向），缺对称的通知出向原语
+（agent→外部）：octopus 为接入 6 个 agent 平台各维护一份 shell 胶水，事件
+翻译散在各平台配置里、归一化契约无单源；无 hooks 机制的平台（minimax）
+永远接不进来——运行时原生出口对这类平台是唯一解。
+- 归一化事件契约：Event 枚举（task_complete / permission_request /
+  input_required / error / session_end）+ 标准 Payload（session_id / title /
+  message / project / branch / priority / extras），doc 带各平台挂点映射表
+  （zcode Stop / cc notification / codex notify / kimi TOML hooks /
+  opencode·mimo JS 插件）
+- 可靠外发：Notifier 出站队列 + 指数退避重试 + 单次尝试超时；Emit 永不
+  阻塞主流程（队列满丢弃计数 + OnDrop 观测），EmitWait 背压形态供
+  「必须送达」的通知；Close 排空在途件（重试契约不受关闭打断）
+- HTTPSink webhook 出口（2xx 送达 / 错误带响应尾片段，凭证走 WithHeader）
+- 确认回执（可选）：AckEndpoint 抽象 + HTTPAckEndpoint（octopus 契约：
+  ack != null 取回 / ack = null 继续等，顶层 null 与 {"ack":...} 双形态
+  兼容）+ PollAck（间隔可配、连续失败超限放弃不空转）
+- 零新增依赖（async.GoSafe 已有；无日志依赖——观测走 error 返回与回调，
+  tier0 纪律）
+测试：重试恢复 / 耗尽丢弃+OnDrop / 队列满不阻塞 / Close 排空+关后丢弃 /
+EmitWait / ack 三拍收敛 / 顶层 null / 持续失败及时放弃 / 线格式钉子。
+全仓 -race 绿。
+关联 oagentkit/runtime#18
+* style(notifyx): gofmt 对齐 pollConfig 字段
+---------
+Co-authored-by: Murphy-Yi <zhangyi@Murphy-YideMac-Mini.local>
+
+- 杂务(deps)：依赖地板追到最新——github.com/oekit/concurrency v0.25.1
+
+| 依赖 | 现地板 | 抬到 |
+|---|---|---|
+| `github.com/oekit/concurrency` | `v0.24.0` | `v0.25.1` |
+## 为什么
+矩阵的**发版时刻地板时效**门禁（`verify_tag_floor --ref HEAD`）要求：各仓 HEAD
+（= 下次发版会发出去的内容）的依赖地板，相对那一刻的依赖最新版本，不能已落后。
+oekit 基座与矩阵模块都在高频发版 ⇒ 地板是**跑步机**，落后一格就会判红。
+## 兼容性实测
+本工具在提交前跑完 `go build` / `go vet` / `go test -race -count=1 ./...`（全绿才提交）
+与 `go mod tidy -diff`（无漂移）⇒ 改动**只影响依赖版本**，零行为差异。
+只改 `go.mod` / `go.sum` ⇒ 不需要 CHANGELOG 条目（版本段由下次发版的 `prewrite` 生成）。
+Co-authored-by: Murphy-Yi <zhangyi@Murphy-YideMac-Mini.local>
+
+- 杂务(deps)：依赖地板追到最新——github.com/oekit/concurrency v0.24.0
+
+| 依赖 | 现地板 | 抬到 |
+|---|---|---|
+| `github.com/oekit/concurrency` | `v0.23.3` | `v0.24.0` |
+| `github.com/oekit/pkg` | `v0.31.2` | `v0.34.1` |
+## 为什么
+矩阵的**发版时刻地板时效**门禁（`verify_tag_floor --ref HEAD`）要求：各仓 HEAD
+（= 下次发版会发出去的内容）的依赖地板，相对那一刻的依赖最新版本，不能已落后。
+oekit 基座与矩阵模块都在高频发版 ⇒ 地板是**跑步机**，落后一格就会判红。
+## 兼容性实测
+本工具在提交前跑完 `go build` / `go vet` / `go test -race -count=1 ./...`（全绿才提交）
+与 `go mod tidy -diff`（无漂移）⇒ 改动**只影响依赖版本**，零行为差异。
+只改 `go.mod` / `go.sum` ⇒ 不需要 CHANGELOG 条目（版本段由下次发版的 `prewrite` 生成）。
+Co-authored-by: Murphy-Yi <zhangyi@Murphy-YideMac-Mini.local>
+
+
+- 文档(progress)：Subscribe 显式声明「channel 永不关闭，消费方必须自带退出分支」（#20）
+
+两建议取 doc 声明：unsubscribe 时 close(ch) 与 Publish 的并发 send 有
+send-on-closed-channel panic 竞窗（Publish 遍历 subs 持的是 channel 引用，
+无全局停顿前提下不可消除）——用阻塞风险换 panic 风险不划算，契约写明
+（裸 for range ch 会永久阻塞，必须 select ctx.Done / cancel 后退出），
+理由进 doc。
+关联 oagentkit/runtime#20
+Co-authored-by: Murphy-Yi <zhangyi@Murphy-YideMac-Mini.local>
+
+
 ## [v0.7.3] — 2026-11-04
 
 ### 重构(hookx)：事件正则编译缓存收编 oekit/pkg/cache SingleFlightCache（并发首编译去重，TTL=0 永不过期无常驻清扫协程）；deps 地板 pkg v0.31.2/concurrency v0.23.3
