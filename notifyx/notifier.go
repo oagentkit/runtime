@@ -33,6 +33,15 @@ type Notifier struct {
 	startOnce sync.Once
 	closeOnce sync.Once
 	done      chan struct{}
+	// abort 在 Close 的限期耗尽时关闭：此后**不再开始新的投递**，队列中
+	// 剩下的件逐件计入丢弃，在途重试的退避也被打断（notifyx#37）。
+	//
+	// 此前 Close 超时只是自己返回 ctx.Err()，后台照常把剩下的件投递成功——
+	// 文档写的「超时未排完的部分按丢弃计」两头都不成立：既没丢弃，也没计数。
+	// 调用方据此判定「未送达」而实际送达了，与它据此判定「已送达」而实际
+	// 丢弃的一样糟：契约必须只有一种读法。
+	abort     chan struct{}
+	abortOnce sync.Once
 
 	timeout     time.Duration // 单次尝试超时（0 = Sink 自理）
 	maxAttempts int           // 总尝试次数（含首次；<1 = 1）
@@ -93,6 +102,7 @@ func NewNotifier(sink Sink, opts ...NotifierOption) *Notifier {
 		maxDelay:    30 * time.Second,
 		queueSize:   256,
 		space:       make(chan struct{}, 1),
+		abort:       make(chan struct{}),
 	}
 	for _, o := range opts {
 		o(n)
@@ -189,6 +199,9 @@ func (n *Notifier) enqueue(p Payload) error {
 }
 
 // deliverLoop 投递循环：逐件重试（指数退避），Close 关队列后排空退出。
+//
+// abort 置位后（Close 限期已到）**不再开始新的投递**：剩下的件逐件计入
+// 丢弃并触发 OnDrop，队列仍照常排空以便 done 关闭（notifyx#37）。
 func (n *Notifier) deliverLoop() {
 	defer close(n.done)
 	for p := range n.queue {
@@ -196,15 +209,39 @@ func (n *Notifier) deliverLoop() {
 		case n.space <- struct{}{}:
 		default:
 		}
-		n.deliver(p)
+		if n.aborted() {
+			n.drop(p, errAborted)
+			continue
+		}
+		if err := n.deliver(p); errors.Is(err, errAborted) {
+			n.drop(p, errAborted)
+		}
 	}
 }
 
-func (n *Notifier) deliver(p Payload) {
+// aborted Close 限期是否已到。
+func (n *Notifier) aborted() bool {
+	select {
+	case <-n.abort:
+		return true
+	default:
+		return false
+	}
+}
+
+// abortNow 置位中止信号（幂等）。
+func (n *Notifier) abortNow() { n.abortOnce.Do(func() { close(n.abort) }) }
+
+// deliver 逐次重试投递。返回 errAborted = Close 限期已到、本次投递中止
+// （由调用方计入丢弃）；其余情况自行 drop 并返回 nil。
+func (n *Notifier) deliver(p Payload) error {
 	var lastErr error
 	for attempt := 0; attempt < n.maxAttempts; attempt++ {
-		if attempt > 0 {
-			n.sleep(backoff(n.baseDelay, n.maxDelay, attempt))
+		if n.aborted() {
+			return errAborted
+		}
+		if attempt > 0 && !n.sleep(backoff(n.baseDelay, n.maxDelay, attempt)) {
+			return errAborted // 退避期间限期到：不再尝试，本件按丢弃计
 		}
 		var err error
 		if n.timeout > 0 {
@@ -216,17 +253,29 @@ func (n *Notifier) deliver(p Payload) {
 		}
 		if err == nil {
 			n.delivered.Add(1)
-			return
+			return nil
 		}
 		lastErr = err
 	}
 	n.drop(p, lastErr)
+	return nil
 }
 
-// sleep 退避等待（固定等待：关闭态不打断重试——Close 前已入队的件按
-// 声明的重试契约走完；Close 的限期语义只约束「等它多久」，不强杀在途件）。
-func (n *Notifier) sleep(d time.Duration) {
-	time.Sleep(d)
+// sleep 退避等待。返回 false = 期间 Close 限期到了，调用方应中止本次投递。
+//
+// 「关闭态不打断重试」仍然成立：正常 Close（排空完成前 ctx 未到期）不会置位
+// abort，已入队的件照声明的重试契约走完。**只有** Close 的限期已经耗尽时才
+// 打断——那一刻契约已宣告这些件按丢弃计，继续重试只会让 Close 返回之后
+// 还有成功投递，正是 notifyx#37 的形态。
+func (n *Notifier) sleep(d time.Duration) bool {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-t.C:
+		return true
+	case <-n.abort:
+		return false
+	}
 }
 
 func backoff(base, max time.Duration, attempt int) time.Duration {
@@ -268,6 +317,21 @@ func (n *Notifier) Close(ctx context.Context) error {
 	case <-n.done:
 		return nil
 	case <-ctx.Done():
+		// 限期已到：剩下的一律按丢弃计（notifyx#37）。
+		//
+		// 记账**不能交给投递循环**：循环是串行的，正卡在一次不理 ctx 的 sink
+		// 调用里时它连下一次取件都做不到，队列里剩下的件就永远不会被计——
+		// 「既不丢弃也不计数」正是 issue 报的形态。故由 Close 自己把队列排干。
+		// channel 的每次接收只归一个接收者，与循环并发排空不会重复计数：
+		// 循环取到的那件走它自己的 abort 分支，Close 取到的计在这里。
+		n.abortNow()
+		for {
+			p, ok := <-n.queue
+			if !ok {
+				break
+			}
+			n.drop(p, errAborted)
+		}
 		return ctx.Err()
 	}
 }
