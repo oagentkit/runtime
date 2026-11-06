@@ -2,6 +2,63 @@
 
 > 本文件由 `matrix-tools/scripts/gen_changelogs.py` 从 git 历史生成，按 tag 切段、取每段内的 conventional commit 渲染。
 
+## [v0.10.0] — 2026-11-07
+
+### 新增(procx)：新增 InheritAllExcept——可信父进程场景不再靠白名单补枚举（#26）
+
+feat(procx): 新增 InheritAllExcept——可信父进程场景（SDK 包装用户自己的 CLI）不再靠白名单补枚举（#26）
+## 根因
+`procx` 的子进程环境纪律是**白名单**（`ChildEnv` + `baseEnvAllow`），那条纪律
+服务于「cli agent / MCP server 在用户工作目录执行任意代码」——全量继承等于把
+宿主凭证交给待执行任务。但它只覆盖了一种威胁模型。
+另一种是 **SDK 包装用户主动发起的 CLI**：go-git-platform 的 `gitbackend` 替用户
+操作**用户自己机器上的仓库**，父进程环境**就是**用户的信任上下文。这类场景用
+白名单是**补不全**的，不是「多补几个就够」：
+- `GIT_*` 是开放式命名空间（`GIT_CONFIG_COUNT` + `GIT_CONFIG_KEY_n` / `VALUE_n`、
+  `GIT_AUTHOR_*`、`GIT_SSH_*`、`GIT_TRACE*`…），组合式命名静态列不到第 n 项；
+- `SSH_AUTH_SOCK`（agent 转发认证）、`GIT_ASKPASS` / `SSH_ASKPASS` / 桌面
+  credential helper（经 PATH 发现）——凭据助手链是活的；
+- locale 族（`LC_*`）、各类 SDK 自己的代理与配置变量。
+漏一项的形态是「认证莫名失败」或「读到别人的配置」，**不是编译错误**，也不会有
+任何门禁红。
+## 修法
+新增独立导出函数（**不是** `ChildEnv` 的 mode 参数）：
+```go
+func InheritAllExcept(except []string) []string
+```
+语义 = 「用户在自己的 shell 里跑这条命令」+ 两条既有纪律。
+### 为什么不做成 `ChildEnv(extra, mode)` 开关
+`ChildEnv` 的白名单是安全纪律的单一事实源；给它加一个 `Mode: InheritAll` 旁路，
+等于让 agent 场景**一行就能漏掉全部凭证**。独立函数让两种威胁模型在调用点字面
+可见：`procx.Run` 仍是白名单；`exec.Cmd{Env: procx.InheritAllExcept(nil)}` 的
+继承语义读代码即知。审计面因此分离。
+### except 的口径
+- 认**变量名**；含 `=` 的项按 `=` 之前取名（`"GIT_TERMINAL_PROMPT=1"` 与裸名
+  同义）——避免「想剔掉它」与「想改它的值」因写法不同而行为不同；
+- **剔除优先于追加**：被剔除的项不会被尾部缺省项加回来；
+- 父进程已有同名项时保留用户的取值（`CI=0` 不该被悄悄改成 `CI=1`），
+  且每个 key 至多出现一次（映射 environ 同名多项、子进程取值依 libc 实现而异的
+  同族问题，runtime#31）；
+- `nil` 与空切片等价 = 全量继承 + 两条纪律。
+`ChildEnv` / `Run` / `baseEnvAllow` **逐字未变**，既有调用方零改动。
+## 反向验证（5 条，均实测红）
+| 注入 | 判据 | 报错 |
+|---|---|---|
+| 退化成白名单实现（`return ChildEnv(except)`） | 继承语义 | `SSH_AUTH_SOCK 应被继承且唯一: n=0 vals=[]` |
+| 父进程循环不剔除 | except 生效 | `被剔除的变量仍在（1 次）` |
+| 缺省追加不看剔除 | 剔除优先于追加 | `GIT_TERMINAL_PROMPT 被剔除后不得再被缺省追加: n=1 vals=[0]` |
+| 缺省追加无视父进程已有值 | 用户值优先 | `CI 应恰好一次，实得 2 次: [0 1]` |
+| except 不做 `=` 归一 | 写法等价 | `GIT_TERMINAL_PROMPT 被剔除后不得再被缺省追加: n=1 vals=[1]` |
+首条**成对**断言：同一变量 `SSH_AUTH_SOCK` 在 `InheritAllExcept` 里必须在、在
+`ChildEnv` 里必须不在——否则「它区别于白名单」这件事没被证明，`baseEnvAllow`
+哪天被顺手加了这一项，单边断言照样绿。
+另有一条**结构性不变量**（比逐个变量断言更强）：`InheritAllExcept(nil)` 的结果
+必须覆盖父进程 `os.Environ()` 的**每一个** name（按名去重后）——约束的是
+「没有遗漏」，不是「我想到的那几个在」。
+## 落地范围
+只加函数与文档。`procx.Run` 的缺省行为不变（仍走白名单）：把「继承」变成默认值
+会让所有既有调用方静默降级安全姿态，那才是真正的破坏性变更。
+
 ## [v0.9.0] — 2026-11-07
 
 ### 新增(hookx)：新增 Runner.FailClosedEvents——安全事件上 hook 失败不再静默放行（#34）
