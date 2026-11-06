@@ -58,5 +58,34 @@ func ChildEnv(extra []string) []string {
 	for _, name := range litOrder {
 		env = append(env, literal[name])
 	}
-	return append(env, "GIT_TERMINAL_PROMPT=0", "CI=1")
+	// 尾部的两个缺省项**按名去重**后再追加（runtime#31）：无条件 append 会在
+	// extra 已给 `CI=0` / `GIT_TERMINAL_PROMPT=1` 时产出同名两项，而
+	// getenv() 取首个还是末个依 libc 实现而异——这正是本函数上一段注释声称
+	// 「每 key 唯一」已消灭的形态。
+	//
+	// 去重口径统一为**先到先得**：显式给的（字面注入 / 按名透传）压过缺省项，
+	// 父进程 environ 里的同名项压过…什么也压不过它自己（见下）。这与
+	// getenv() 的「首个命中」语义一致，所以去重不改变子进程实际读到的值，
+	// 只是把「读到哪个」从实现相关变成确定的。
+	//
+	// seen 同时兜住 os.Environ() 自身可能出现的同名项（同为先到先得）。
+	out := make([]string, 0, len(env)+2)
+	seen := make(map[string]bool, len(env)+2)
+	for _, kv := range env {
+		name, _, _ := strings.Cut(kv, "=")
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		out = append(out, kv)
+	}
+	for _, kv := range []string{"GIT_TERMINAL_PROMPT=0", "CI=1"} {
+		name, _, _ := strings.Cut(kv, "=")
+		if seen[name] {
+			continue // 显式项在位：缺省值不得覆盖，也不得并列出第二项
+		}
+		seen[name] = true
+		out = append(out, kv)
+	}
+	return out
 }
