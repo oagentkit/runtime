@@ -11,9 +11,11 @@ import (
 )
 
 var (
-	errQueueFull       = errors.New("notifyx: 出站队列已满")
-	errClosed          = errors.New("notifyx: 外发器已关闭")
-	errInvalidPayload  = errors.New("notifyx: 载荷无效（event 不在契约枚举）")
+	errQueueFull      = errors.New("notifyx: 出站队列已满")
+	errClosed         = errors.New("notifyx: 外发器已关闭")
+	errInvalidPayload = errors.New("notifyx: 载荷无效（event 不在契约枚举）")
+	// errAborted Close 限期已到，本件按丢弃计（notifyx#37）。
+	errAborted         = errors.New("notifyx: Close 限期已到，未排空的部分按丢弃计")
 	errAckUnauthorized = errors.New("notifyx: ack 端点拒绝（检查凭证）")
 )
 
