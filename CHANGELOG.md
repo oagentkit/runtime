@@ -2,6 +2,485 @@
 
 > 本文件由 `matrix-tools/scripts/gen_changelogs.py` 从 git 历史生成，按 tag 切段、取每段内的 conventional commit 渲染。
 
+## [v0.9.0] — 2026-11-07
+
+### 新增(hookx)：新增 Runner.FailClosedEvents——安全事件上 hook 失败不再静默放行（#34）
+
+包文档写着「需要强一致的场景由调用方在 OnError 里自行收紧」，但
+```go
+out, err := runHook(ctx, h, payload)
+if err != nil {
+    if r.OnError != nil { r.OnError(h, err) }
+    continue                    // ← 失败即「无意见」，调用方无从干预
+}
+```
+`OnError func(h Hook, err error)` 是**纯观察者**：它拿不到结果、也无法中断。
+于是对 PreToolUse / PermissionRequest 这类安全 hook，二进制缺失、超时、坏 JSON
+全部静默等于「放行」。文档承诺的那条收紧通道在机制上不存在——不是调用方不肯
+写，是写了也没用。
+新增 `Runner.FailClosedEvents []Event`：列出的失事件类型上，hook 执行失败落一条
+**保守判定**（`BlockRequested` + `PreventContinuation` + 权限事件上
+`PermissionBehavior="deny"` + 说明成因的 `StopReason`）。两条通道并存：`OnError`
+照旧上报（调用方既要判定也要成因）。
+三条设计取舍：
+1. **缺省不开**。fail-open 仍是缺省——扩展点故障不该无差别阻断业务，这个原设计
+   成立；需要安全的场景显式列出事件。列表**逐事件生效**，不是全局开关。
+2. **Stop 上刻意不产生判定**。该事件 block 的语义是反的（否决停止、继续跑），
+   一次执行失败不足以支撑「必须继续」这种强结论——把失败强扭成继续跑与「保守」
+   正好相反。此事件上的失败仍经 OnError 可见，不静默。
+3. **与既有 deny 单调同向**。失败落 deny 不会顶掉更严的判定，也不会被正常
+   hook 的 approve 盖掉（`merge` 的 deny 单调保证）。
+## 反向验证
+把 `Run` 里那一句 `merged.merge(failClosedResult(...))` 去掉（即退回
+「失败即 continue」）：
+```
+--- FAIL: TestFailClosedDeniesSafetyEvent/pretool-exit3
+    失败应判 deny（否则等于静默放行）: {… PermissionBehavior: …}
+--- FAIL: TestFailClosedDeniesSafetyEvent/pretool-badjson
+--- FAIL: TestFailClosedDeniesSafetyEvent/permission-exit3
+--- FAIL: TestFailClosedKeepsHealthyHookVerdict
+    失败 hook 的 deny 应压过 approve: {… PermissionBehavior:allow …}
+```
+最后一行的 `PermissionBehavior:allow` 正是缺陷形态：一个 hook 放行、另一个 hook
+干脆没跑成，结果读作「放行」。恢复后绿。
+## 用例
+新增 `hookx/failclosed_test.go` 六条（全部端到端 `Runner.Run`，hook 用真实 sh）：
+- `TestFailClosedDeniesSafetyEvent`：三个子用例（非零退出 / stdout 非 JSON /
+  PermissionRequest 上非零退出）——两种失败形态都覆盖。
+- `TestFailOpenIsDefault`：**成对对照**——不列事件时保持无意见，否则「一律
+  fail-closed」也能让上一条绿，而扩展点故障开始阻断全部业务。
+- `TestFailClosedOnStopAddsNoVerdict`：Stop 上不产生判定，但 OnError 仍被调用。
+- `TestFailClosedStillReportsOnError`：两条通道并存。
+- `TestFailClosedOnlyAffectsListedEvents`：只列 PreToolUse 时
+  PermissionRequest 仍 fail-open。
+- `TestFailClosedKeepsHealthyHookVerdict`：失败落 deny 压过另一 hook 的 approve。
+包文档与 `Runner` 字段文档同步（并删掉「由调用方在 OnError 里自行收紧」这句做了
+不到的话，改成指向 FailClosedEvents）。
+`go vet` + `go test -race -count=1 ./hookx/` 绿。
+
+### 修复(notifyx)：Close 限期到点后真正丢弃并计量——「未排空部分按丢弃计」不再两头不成立（#37）
+
+## 根因
+`Notifier.Close` 的文档写着「超时未排完的部分按丢弃计」，实现却是：
+```go
+case <-ctx.Done():
+	return ctx.Err()
+```
+**既没丢弃，也没计数**，后台 `deliverLoop` 照常把队列里剩下的件投递成功。
+调用方据此判定「未送达」而实际送达了——与它据此判定「已送达」而实际丢弃的
+一样糟：契约必须只有一种读法。
+## 修法
+新增 `abort` 信号（Close 的限期耗尽时置位）：
+- `deliverLoop` 取到货时若已 abort ⇒ 不再投递，逐件计入丢弃并触发 `OnDrop`；
+- `deliver` 每次尝试前、以及退避等待中检查 abort，命中则中止本次投递并交回
+  调用方计入丢弃（`sleep` 改为可中断，返回 `false` 表示限期已到）；
+- `Close` 超时路径自己把队列排干并记账。
+### 为什么记账不能交给投递循环
+第一版实现把「排空剩余并计数」交给 `deliverLoop`，用例当场红：
+循环是**串行**的，正卡在一次不理 ctx 的 sink 调用里时，它连下一次取件都做不到，
+队列里剩下的件就永远不会被计——正是 issue 报的「既不丢弃也不计数」。
+故由 `Close` 自己 `for { p, ok := <-n.queue }` 排干。channel 的每次接收只归
+一个接收者，与循环并发排空不会重复计数：循环取到的那件走它自己的 abort 分支，
+`Close` 取到的计在超时路径里。
+### 「关闭态不打断重试」仍然成立
+正常 Close（排空前 ctx 未到期）不会置位 `abort`，已入队的件照声明的重试契约
+走完。**只有**限期已耗尽时才打断——那一刻契约已宣告这些件按丢弃计，继续重试
+只会让 Close 返回之后还有成功投递。
+## 用例
+新增 `notifyx/close_drain_test.go`：
+1. **`TestCloseTimeoutDropsRemaining`**（判别式）——5 件入队，sink 卡住首件，
+   用**已取消**的 ctx 调 Close：断言剩下的 4 件计入 `Dropped`、`OnDrop` 收到
+   4 次、此时 `Delivered()==0`；放行在飞件后 `Delivered()==1`、
+   `sink 只收到 1 件`、`Delivered+Dropped==5`（账平）。
+2. **`TestCloseWithinDeadlineDrainsEverything`**（成对对照）——限期充裕时
+   5 件全部送达、`Dropped()==0`。否则「一律放弃」也能让上一条绿，
+   而正常停机开始丢通知。
+## 反向验证
+退回「超时只返回 ctx.Err()」：
+```
+--- FAIL: TestCloseTimeoutDropsRemaining (3.00s)
+    close_drain_test.go:76: 超时等待：剩余 4 件计入 Dropped
+```
+## 验证
+`go test ./...` 全绿；`go test -race ./notifyx/` 绿。
+关联 oagentkit/runtime#37
+
+### 修复(notifyx)：Emit 与 Close 的竞窗封死——closed 检查与入队在锁内，「closed 后一律丢弃」成为真承诺（#28）
+
+`Emit` 是 check-then-act：
+```go
+if n.closed.Load() { n.drop(p, errClosed); return }
+select {
+case n.queue <- p:   // ← closed=false 后、send 前，Close 插入 close(n.queue)
+default:             //    select 的 send case 对已关闭 channel 照样 panic
+}
+```
+而 `Close` 直接 `close(n.queue)`。两者之间没有同步 ⇒ `send on closed channel`
+**进程级 crash**。包注释宣称的「closed 置位后 Emit 一律丢弃（防 panic）」当时
+并不成立——那条注释描述的是意图，不是事实。
+## 改法：检查与入队同一把锁，关闭也在锁内
+- 新增 `sendMu sync.RWMutex`。`enqueue` 在**读锁**内做「closed 检查 + 非阻塞
+  send」；`Close` 在**写锁**内做「置 closed + close(queue)」。竞窗不可达。
+- 抽 `enqueue(p) error` 作为唯一入队口，返回 `errClosed` / `errQueueFull` 供
+  两个入口分别计数；`Emit` 的「永不阻塞主流程」由 `select + default` 成为结构
+  性事实，不再依赖调用点自觉。
+- `EmitWait` 改为「enqueue 失败 → 等 `space` 信号 → 重试」的循环：
+  - **等待期间不持锁**——否则一个被慢 sink 堵住的 `EmitWait` 会让 `Close` 卡在
+    锁上，连带 `Close` 的 ctx 限期失效（比 panic 更隐蔽）；
+  - `space` 是容量 1 的信号 channel，`deliverLoop` 每取走一件非阻塞投一个；
+    事件驱动，不轮询睡眠，唤醒后重试即可（信号是「可能有空位」，不是计数）。
+## 顺带修掉同一生命周期的挂死
+`Close` 的 `done` 由投递循环关闭，而循环是**惰性启动**的：从没 Emit 过就
+`Close` ⇒ 等一个永不关闭的 `done`，**永久挂死**。`Close` 现在在关闭队列后补一次
+`startLoop()`（`sync.Once`，与并发 Emit 的启动互斥），循环起来看到已关闭的空队列
+即排空退出。这是写并发用例时撞上的真实挂死路径，不是假想。
+## 反向验证
+把 `Emit` 退回 check-then-act、`Close` 退回锁外 `close`，并发用例 `-count=30`：
+```
+panic: send on closed channel
+```
+**逐字复现 issue 描述的崩溃**。恢复后 `-count=3` 全绿。
+## 用例
+新增 `notifyx/concurrency_test.go` 四条：
+- `TestConcurrentEmitDuringCloseDoesNotPanic`：8 个 emitter × 300 件与 `Close`
+  并发（同一 `start` 通道放行，让竞窗真的落在「已过检查、尚未 send」）。断言
+  ① 不 panic；② **`Delivered + Dropped == 调用次数`**（不漏账——漏账意味着某件
+  既没送达也没计入丢弃，正是竞态吞件的形态）；③ `Close` 之后 Emit 确实丢弃。
+- `TestCloseWithoutEmitReturns`：无 Emit 的 `Close` 必须返回（挂死回归），重复
+  `Close` 幂等。
+- `TestEmitWaitUnblocksOnClose`：`EmitWait` 不再向已关闭队列发送，也不把调用方
+  永久挂住。
+- `TestEmitWaitHonorsCtxWhenQueueStuck`：队列永远腾不出空间时按 ctx 收口且计入
+  丢弃。构造是确定性的——先等 sink 真正开始处理第一件（队列必空、投递 goroutine
+  必堵住），再填满一格，`EmitWait` 必然进「等 space」分支（第一版用两次 `Emit`
+  就断言「队列已满」，是脆的时序断言，已改）。
+`go vet` + `go test -race -count=3 ./notifyx/` 绿。
+
+### 修复(hookx)：权限判定在家门口也要 deny 单调——continue:false 的 deny 不再被 approve 顶掉（#29）
+
+`processOutput` 对同一个 hook 的输出依次跑
+```go
+applyContinueFlag(event, out, &res)  // continue:false → PermissionBehavior="deny"
+applyDecision(event, out, &res)      // decision:"approve" → 覆盖成 "allow"
+```
+两个字段写**同一个 res**，后置的 approve 直接顶掉先置的 deny。而跨 hook 归并
+（`merge`）是 deny 单调的——**同一份语义在两个层级上方向相反**，且家门口那个
+方向不安全：一个同时说「别继续」和「放行」的自相矛盾输出，被静默解析为放行。
+改三处：
+1. **`setPermission` 成为 `PermissionBehavior` 的唯一写入口**，allow 不得覆盖
+   已置的 deny。`applyContinueFlag` 与 `applyDecision` 都走它，两层从此同口径：
+   权限面只向保守方向收敛。
+2. **decision 大小写不敏感**（`strings.ToLower(strings.TrimSpace(...))`）。
+   `"BLOCK"` / `"Approve"` 是常见手写形态，原实现精确匹配落空 ⇒ 静默忽略 ⇒
+   hook 想拦、库当没看见。这不是「容忍脏输入」而是安全方向：**丢掉的
+   `BLOCK` 等于丢拦截面**。
+3. **契约外的取值经 `Runner.OnError` 上报**。`processOutput` 改为返回
+   `(RunResult, error)`，`Run` 里结果照常参与归并、错误转 OnError——静默忽略
+   正是这次要消灭的形态。取值为空仍是「无意见」，不算越界；越界值**不猜语义**
+   （不置任何权限/阻断位），只让它可见。
+## 反向验证
+三处各自单独回退，都红：
+1. 去掉 `setPermission` 的 deny 单调守卫——
+   ```
+   TestContinueFalseBeatsApprove: continue:false 的 deny 被 approve 顶掉了:
+       {AdditionalContexts:[] BlockRequested:true PreventContinuation:true
+        StopReason:矛盾输出 PermissionBehavior:allow}
+   ```
+   权限位是 `allow`、阻断位还置着——正是 issue 描述的自相矛盾结果。
+2. 退回大小写精确匹配（`decision := out.Decision`）——
+   ```
+   --- FAIL: TestDecisionCaseInsensitive/BLOCK
+       decision="BLOCK" 应按契约识别为 deny+block: {… BlockRequested:false
+        PreventContinuation:false PermissionBehavior: …}
+   --- FAIL: TestDecisionCaseInsensitive/Block
+   --- FAIL: TestDecisionCaseInsensitive/Approve
+   ```
+   三条全落空 ⇒ 拦截/放行判定整个丢失。
+3. 把 default 分支改回静默忽略——
+   ```
+   TestUnknownDecisionReported: 越界 decision 应上报一次 OnError，实得 0 次
+   ```
+三条都红过才恢复。
+## 用例
+新增 `hookx/decision_arbitration_test.go` 六条（都是端到端 `Runner.Run` + 真实
+sh hook，不打桩内部函数）：
+- `TestContinueFalseBeatsApprove`：issue 复现。
+- `TestApproveStillAllows`：**成对对照**——无矛盾时 approve 照常生效，否则
+  「一律算 deny」也能让上一条绿而放行能力整体消失。
+- `TestDecisionCaseInsensitive`：`BLOCK` / `Block` / `Approve` / 带空白的
+  `approve` 四个子用例。
+- `TestUnknownDecisionReported`：`"reject"` 上报一次且信息点名取值与字段；
+  同时断言不猜语义（不置任何位）。
+- `TestContractDecisionNoError`：`""` / `approve` / `block` **不得**触发
+  OnError——否则上一条退化成「每次调用都报错」的噪声。
+- `TestCrossHookDenyMonotonic`：跨 hook 归并的既有语义回归。
+字段文档同步：`Output.Decision` 写明大小写不敏感与越界上报；
+`RunResult.PermissionBehavior` 写明「两个层级都单调」。
+`go vet` + `go test -race -count=1 ./hookx/` 绿。
+
+### 修复(procx)：lineWriter 重同步改用 IndexByte——超限行之后的完整行不再被整段吞掉（#30）
+
+`lineWriter.Write` 在 overflow 态下用
+```go
+if i := bytes.LastIndexByte(p, '\n'); i >= 0 {
+    w.overflow = false
+    w.partial = append(w.partial[:0], p[i+1:]...)
+}
+```
+这是**跳到本 chunk 的最后一个换行**：超限行的行尾与该换行之间的所有内容
+（可能是一整批完整事件行）被静默丢弃且不回调。触发面正是注释自己点名的形态
+——单行 >1MB（含超大 diff 的 stream-json result 事件）之后，同一 read chunk
+里的后续事件行全部丢失，消费方只看到事件流断片，**没有任何信号**。
+重写成「按 chunk 内的位置逐段推进」的循环：
+- overflow 态用 `bytes.IndexByte` 找**第一个**换行（那是超限行的行尾），
+  之后从行尾 +1 起**继续按行处理**，不再跳。
+- 顺带修掉同一判定里的第二个吞行面：旧代码的限容判据是
+  `len(partial)+len(p) > maxLineLen`，量的是**整个 chunk**——一个含多行、
+  总字节超 1MB 但**每行都远小于上限**的 chunk 会被整段丢弃。改为逐行判定
+  `len(partial)+i > maxLineLen`（i 为本行行尾偏移），超限的只有那一行。
+- 跨 chunk 与被 chunk 边界切开的行保持原行为（partial 拼接），空行仍不回调。
+- `Write` 现在始终返回**入参原长度**（io.Writer 契约），先存 `n := len(p)`
+  再从各出口返回 n。
+## 反向验证
+把 `Write` 整体退回旧实现（其余不动）跑本批用例：
+```
+--- FAIL: TestLineWriterResyncKeepsTrailingLines
+    超限行行尾之后的完整行被吞了: got [] want [{"type":"step","n":1} {"type":"result","result":"ok"}]
+--- FAIL: TestLineWriterMultiLineChunkBeyondCap
+    逐行都在上限内，不应进 overflow
+--- FAIL: TestLineWriterChunkInternalOverflow
+    got [ok-2 ok-3] want [ok-1 ok-2 ok-3]
+--- FAIL: TestLineWriterSingleOversizedLineInChunk
+    本 chunk 内已扫到行尾，不应保持 overflow
+```
+第一条与 issue 的描述逐字对应（`got []`——两条完整行一行都没回调）；
+第二、四条是同一处判定的另两个面，旧实现同样红。恢复后绿。
+## 用例
+新增 `procx/linewriter_test.go` 六条：
+- `TestLineWriterResyncKeepsTrailingLines`：**issue 复现**——超限行行尾 + 同
+  chunk 两条完整事件行，断言两条都回调且内容逐字一致。
+- `TestLineWriterMultiLineChunkBeyondCap`：成对保护——400 条 4KB 行（合计
+  ~1.6MB，每行都在上限内）必须全部回调，防止用「整 chunk 超限即丢弃」换修复。
+- `TestLineWriterChunkInternalOverflow`：洪泛行收尾后连续两次写入，状态复原。
+- `TestLineWriterSingleOversizedLineInChunk`：单行自身超限（行尾在本 chunk 内）。
+- `TestLineWriterPrefixSplitAcrossChunks`：行被 chunk 边界切开仍拼回一行。
+- `TestLineWriterEmptyLinesSkipped`：空行不回调（既有语义）。
+既有 `TestLineWriterFloodCap`（3MB 洪泛后仍能恢复）继续绿。
+`go vet` + `go test -race -count=1 ./procx/` 绿。
+
+### 修复(notifyx)：零值 Timestamp 真的补 now——条件写反使「静默丢字段」成为常态（#27）
+
+`Payload.Timestamp` 的契约（`notifyx.go:40` 与包文档）是「Emit 时零值自动补
+now」，代码写的是
+```go
+if !p.Timestamp.IsZero() {   // ← 条件写反：非零才进
+    p.Timestamp = time.Now().UTC()
+}
+```
+调用方**不填** Timestamp 才是 Emit 的常规形态——于是常规路径上时间戳永远是零值
+时刻，`omitempty` 把 `timestamp` 字段整个序列化掉：下游按时间排序、按窗口过滤、
+按事件时刻对账全部失效，而且没有任何信号（字段是「缺」不是「错」）。反过来，
+调用方显式带的时刻反而被本地时钟覆盖——两个方向都错。
+修法两步：
+1. 去掉 `!`；
+2. **把两处合并成一份 `stamp(*Payload)`**。`Emit` 与 `EmitWait` 此前各写一遍
+   同样的三行，于是一起写反（issue 点名 `:96-97` 与 `:120-121`）。单写一处，
+   这类「同一判据两处副本一起漂」的结构性缺陷不会再复发。
+非零值一律保留——调用方自带的事件时刻优先于本地时钟。
+## 反向验证
+1. 把条件写回 `!p.Timestamp.IsZero()`：
+   ```
+   TestEmitStampsZeroTimestamp: 零值时间戳未补 now——下游按时间排序/过滤全哑
+   TestEmitWaitStampsZeroTimestamp: EmitWait 零值时间戳未补 now
+   TestEmitPreservesExplicitTimestamp: 显式时刻被改写: got 2026-11-06 … want 2020-03-04 … CST
+   ```
+   第三条正是「同时修坏另一半」的证据：条件反向之后，显式时刻被本地时钟顶掉。
+2. 把 helper 改成无条件覆盖（`p.Timestamp = time.Now().UTC()`）——
+   ```
+   TestEmitPreservesExplicitTimestamp: 显式时刻被改写 …
+   ```
+   这条钉住「不要为了补零而吞掉调用方的时刻」。两条都红过才恢复。
+## 用例
+新增 `notifyx/timestamp_test.go` 四条，全部事件驱动（sink 把载荷转发到 channel
+后 `select` 等待，不用 sleep 猜时序）：
+- `TestEmitStampsZeroTimestamp`：零值补 now，且落在 emit 前后窗口内、时区为 UTC。
+- `TestEmitPreservesExplicitTimestamp`：**成对的反向对照**——显式时刻原样保留。
+- `TestEmitWaitStampsZeroTimestamp`：EmitWait 同病同治。
+- `TestPayloadJSONKeepsTimestamp`：线格式钉子——序列化结果里真的存在
+  `timestamp` 键（`omitempty` 吃掉零值正是缺陷的「静默」机理，只断言结构体
+  字段非零抓不到它）。
+`go vet` + `go test -race -count=1 ./notifyx/` 绿。
+
+### 修复(hookx)：Stop 事件不再置 PreventContinuation——与「否决停止」语义相反（#33）
+
+`applyDecision` 的 `block` 分支在进 `event == EventStop` 特判**之前**就无条件
+`res.PreventContinuation = true`，于是 Stop 事件上两个字段同时为真：
+- `PreventContinuation` = 「该事件不允许继续」（字段文档限定
+  PreToolUse/PermissionRequest）；
+- `StopShouldContinue` = 「否决停止、继续跑」。
+**这两个信号方向相反。** 通用处理若按「`PreventContinuation` → 不继续」分派，
+Stop 上「要求继续」会被读成「禁止继续」——语义 180 度反转，而且两个字段都
+「有值」，调用方无从察觉。
+## 改动
+`block` 分支与同文件 `continue:false` 的分支改成**逐字同构**：非 Stop 才置
+`PreventContinuation` 并收口；Stop 落到否决停止分支。
+顺带把 `RunResult.PreventContinuation` 的字段文档补上不变量
+「Stop 事件上恒为 false」——文档原来只写「限定 PreToolUse/PermissionRequest」，
+读者得自己反推出 Stop 上不可能同时为真是站不住的。
+## 反向验证
+只把 `PreventContinuation = true` 挪回特判之前（其余不动）：
+```
+Stop 事件不得置 PreventContinuation: {BlockRequested:true
+  PreventContinuation:true StopShouldContinue:true ...}
+```
+两个子用例红，输出里 `PreventContinuation:true` 与 `StopShouldContinue:true`
+并列——正是要消灭的那个自相矛盾状态。
+## 用例取舍
+三对钉：
+- `TestPreventContinuationNeverOnStop`：`decision:block` /
+  `continue:false` / `decision:block` + `systemMessage` 三条入口都要
+  `PreventContinuation == false` 且 `StopShouldContinue == true`。
+  `BlockRequested` 按入口分别断言——`continue:false` 在 Stop 上既有语义**不置**
+  该位，本次不改动它，只钉住 PreventContinuation（改了就是另一件事）。
+- `TestPreventContinuationStillSetForToolEvents`：**成对的反向对照**——
+  PreToolUse / PermissionRequest / PostToolUse 上的 block 必须仍然置位。
+  只测「Stop 不再置位」的话，把字段整个删掉也能全绿，而安全阻断面会静默失效。
+- `TestStopBlockKeepsAdditionalContexts`：回归，Stop 上 block 的
+  `systemMessage` / `reason` 仍要进 `AdditionalContexts`。
+`go vet` + `go test -race -count=1 ./hookx/... ./procx/...` 绿。
+
+### 修复(procx)：ChildEnv 尾部缺省项按名去重——「每 key 唯一」不再被自家追加破坏（#31）
+
+函数文档承诺「每 key 唯一，避免 environ 同名两项时子进程取值依实现而异」，
+但最后一行 `append(env, "GIT_TERMINAL_PROMPT=0", "CI=1")` **无条件**追加：
+`extra` 已给 `CI=0` 时 environ 出现两个 `CI` —— 正是这段注释声称已消灭的形态。
+失效形态不是「值错」，是**值不可预测**：子进程 `getenv()` 取首个还是末个依
+libc 实现而异，同一份配置在不同平台上跑出不同行为。
+## 改动
+去重口径统一为**先到先得**：显式给的（字面注入 / 按名透传）压过缺省项；
+缺省项只在同名键缺席时补入。这与 `getenv()` 的「首个命中」语义一致，所以
+去重**不改变**子进程实际读到的值，只是把「读到哪个」从实现相关变成确定的。
+`seen` 顺带兜住 `os.Environ()` 自身可能出现的同名项（同为先到先得），
+「每 key 唯一」因此成了无条件成立的不变量，而不是「只要调用方别乱传」的约定。
+注意保留的既有语义：字面注入仍**压过**父进程同名值（`literal[name]` 命中时跳过
+父进程项），这条有回归用例钉着。
+## 反向验证
+逐字退回 `return append(env, "GIT_TERMINAL_PROMPT=0", "CI=1")`：
+| 用例 | 结果 |
+|---|---|
+| `TestChildEnvTailDefaultsNotDuplicated` | 红 ×3 —— `CI 出现 2 次（[0 1]）` / `GIT_TERMINAL_PROMPT 出现 2 次（[1 0]）` |
+| `TestChildEnvKeyUniqueness` | 红 —— case #1（按名透传 `CI`）、#2（字面 `CI=0`）、#4（两键都覆盖）各报一次重复 |
+| `TestChildEnvTailDefaultsKeptWhenAbsent` | **绿**（缺省值仍在） |
+| `TestChildEnvLiteralBeatsParent` | **绿**（既有优先级未变） |
+## 用例取舍
+`TestChildEnvKeyUniqueness` 不看具体哪一项，只看「整份 env 有没有同名键」——
+这是把文档承诺本身可执行化，比逐条断言更能防住将来新增的追加点。
+`TestChildEnvTailDefaultsKeptWhenAbsent` 是**成对的反向对照**：若去重把缺省项
+整个丢了，前一条只会看到「恰好一次」而不会发现 `CI=1` / `GIT_TERMINAL_PROMPT=0`
+已经不在——只测重复、不测存在，会放过「全删了」这种「更彻底」的错修。
+`go vet` + `go test -race -count=1 ./procx/...` 绿。
+
+### 修复(procx)：截断留痕改在返回前统一盖上——失败/超时路径不再静默丢标记（#38）
+
+`execCLI` 有三条返回路径，`noteTruncated` 只挂在成功那条上：
+- 成功 / `waitDelayIsBenign` → `noteTruncated(out, outBuf, maxStdout)` ✅
+- 非零退出 / 超时 / 取消 → **裸返 `out`** ❌
+`cappedBuffer` 的超限截断在任何等待路径都可能发生，于是失败路径返回的 stdout
+已被裁到 `maxStdout` 却没有任何标记 —— 排障时把「截断导致看不到结论」误读成
+「命令根本没输出结论」。纯观测面缺陷，但代价落在最需要信息的时刻。
+## 改动
+不在三个 `return` 处各补一遍，而是**把留痕上提到计算 `out/errStr` 的那一行**：
+「任何路径都带标记」成了结构性事实，而不是三处各写一遍的自觉（下一条返回路径
+加进来时不会再漏）。三个 `return` 随之回到裸 `out, errStr`。
+**stderr 同病同治**：它的上限是 `maxChildStdout`（8MB），此前两条路径都不标记。
+同一次改动一并覆盖，否则就是「修了 stdout、留 stderr 静默」的半修。
+## 反向验证
+逐字退回原实现（只把留痕上提那一行拆回去、`return` 补回 `noteTruncated`）：
+| 用例 | 结果 |
+|---|---|
+| 失败路径 | 红 —— 末尾只有 `aaaa…`，无标记 |
+| 超时路径 | 红 —— 末尾只有 `bbbb…`，无标记 |
+| stderr 超限 | 红 |
+| 成功路径（回归） | **绿**（既有行为未被破坏） |
+| 未超限负对照 | **绿**（证明标记不是无条件加的） |
+## 用例取舍
+- `MaxStdout` 压到 4096 + `head -c 200000`，避免搬真 1MB 数据；
+- 超时路径刻意「先刷满 stdout 再长睡」，让截断确定性地发生在超时之前
+  （否则可能超时先到、缓冲还没超限，用例偶发绿）；
+- `TestTruncationUnmarkedWhenUnderLimit` 是**成对的反向对照**：只有「开着绿」的
+  用例等于没钉住 —— 若标记无条件加，前面几条照样过；
+- stderr 那条要往 stderr 写 9MB，`testing.Short()` 下跳过。
+`go vet` + `go test -race -count=1 ./procx/...` 绿。
+
+### 修复(progress)：退订时关闭订阅 channel，for range 不再永久阻塞（#32）
+
+根因：unsubscribe 只从 subs 表摘注册，channel **永不关闭**。消费方写
+`for e := range ch` 时，退订/ctx 取消后 range 永不退出——goroutine 泄漏，
+且已入 64 缓冲的事件被钉在无人消费的 channel 上。
+旧注释把「不 close」归因为「close 与并发 send 的竞窗不可消除」，
+**这个前提是错的**：Publish 遍历 subs 并发送时持 b.mu，unsubscribe 摘注册
+与 close 也在 b.mu 内 ⇒ 两者同锁互斥，不存在「send 到已关闭 channel」的窗口。
+故改为**持锁 close**。
+连带修掉一个隐蔽缺陷：`delete(b.subs, ch)` 原先在 `once.Do` **之外**，
+关闭 channel 之前重复 delete 是幂等的、看着没问题；一旦加上 close，
+重复调 cancel 就是二次 close ⇒ panic。现在 close(stop)/delete/close(ch)
+全部收进同一个 once（重复退订、以及「显式 cancel + ctx 取消」双向收口都只关一次）。
+契约变更（已写进 Subscribe 的 godoc）：
+- `for range ch` 现在能正常退出，且会先把关闭前已入缓冲的事件取完；
+- **select 消费必须检查 ok**（`v, ok := <-ch`）——关闭后该 case 恒可就绪并
+  反复给零值，写 `case v := <-ch:` 而不查 ok 的循环会空转。这是 Go 里所有
+  可关闭 channel 的通用前提，不是本包的额外要求，但属于**行为变更**，需在
+  发版说明里点名。
+反向验证（两处，各自只拆一处）：
+- 去掉持锁 close ⇒ TestUnsubscribeClosesChannelForRange 红（range 未退出）；
+- 把 delete 退回 once 之外（只加 close 忘了幂等）⇒ TestUnsubscribeIdempotentNoDoubleClose
+  红，panic: close of closed channel。
+用例：`-race` 下跑过并发 Publish + 反复订阅/退订（8 发布者 × 2000 事件 ×
+200 次退订），无 send on closed channel；另有「缓冲事件关闭前取完」一条。
+既有 TestSubscribeCtxCleanup 按新契约改写——它原先用「收到即失败」判，
+而关闭后 `<-ch` 恒可就绪给零值，会把「已关闭」误判成「收到了事件」。
+
+### 修复(procx)：ErrWaitDelay 成功特判补 cctx 条件——本地超时不再被上报为成功（#35）
+
+根因：`errors.Is(waitErr, exec.ErrWaitDelay) && ctx.Err() == nil` 只看**调用方**
+ctx。而触发 WaitDelay 的场景（leader 已退出、孙进程仍握 stdout 写端）恰好是
+本地 Timeout 最可能到点的时刻：leader 恰以 0 退出时，`ctx` 确实干净，
+只有 `cctx`（context.WithTimeout 派生）已 DeadlineExceeded ⇒ 被**超时终止**的
+执行走上「exit 0 成功」分支，ErrTimeout 语义整条丢失，调用方以为命令跑完了。
+修法：判据抽成具名函数 waitDelayIsBenign，三个条件缺一不可——
+waitErr 是 ErrWaitDelay / ctx.Err()==nil / **cctx.Err()==nil**。
+非良性一律落 classifyWait，其 `errors.Is(cctx.Err(), DeadlineExceeded)` 分支
+给出 ErrTimeout（既有实现，未改）。
+为什么抽函数而不是就地加一个 &&：这个竞态要求「leader 退出点与本地超时点重合」，
+用真实进程**无法稳定复现**——写出来的 e2e 要么靠 sleep 猜时序（flaky），
+要么永远打不中窗口（假绿）。抽成纯判据后可以用构造的 ctx 逐条钉死：
+本地超时那条用 `<-cctx.Done()` 等 deadline 真正落定，不靠 sleep。
+反向验证：把判据退回只查 `ctx.Err() == nil` ⇒
+`ErrWaitDelay + 本地超时已到 = 失败` 立即红（其余四条仍绿，证明不是整包失灵）。
+覆盖：双 ctx 干净=成功（npm 类守护化孙进程不可误判为失败）/ 本地超时=失败 /
+调用方取消=失败 / 非 ErrWaitDelay=失败 / 多层 %w 包裹的判别。
+良性路径的端到端仍由既有 TestRunLeaderExitsWithDaemonGrandchild 覆盖（未改）。
+
+- 杂务(deps)：依赖地板追到最新——concurrency v0.27.0 / pkg v0.35.2
+
+- 测试(procx)：超时截断留痕用例的时间余量给足——400ms 在 -race 并行下会假红
+
+`TestTruncationMarkedOnTimeoutPath` 要求「子进程先写满 stdout、再被本地超时
+杀掉」，超时设的是 400ms。在 `-race` + 全量并行的机器上，400ms 不够 `sh` 起来
+（`head -c 200000 /dev/zero | tr …` 这条管道还没产出就被进程组 TERM 掉），
+stdout 为空 ⇒ 断言「超时路径必须带截断标记」**误判为没留痕**：
+```
+--- FAIL: TestTruncationMarkedOnTimeoutPath (0.40s)
+    truncation_marker_test.go:94: 超时路径的截断 stdout 必须带标记: 末尾 ""
+```
+单独跑必绿、`go test ./procx/ -race` 跑全量偶红——典型的「时间边距伪装成断言」。
+本用例要钉的是**返回路径的留痕**（runtime#38），不是「400ms 内能起一个进程」，
+故把余量放到 2s（子进程启动只需几十 ms，余量 ~40x），并把这条理由写进用例注释。
+不变式未放松：断言仍是「stdout 必须带截断标记」，只是不再让「子进程没来得及
+写」这种与被测行为无关的失败混进来。
+`go test ./procx/ -race -count=1` 连跑绿。
+
+
 ## [v0.8.0] — 2026-11-06
 
 ### 新增(notifyx)：生命周期事件通知出口——归一化契约 + 可靠外发 + 确认回执轮询
