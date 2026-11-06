@@ -1,6 +1,7 @@
-// Package procx 子进程托管纪律单源：进程组执行（Setpgid 建组 → 超时/取消
-// TERM 整组 → 宽限 SIGKILL）、限容采集（stdout/单行双上限）、stdout 按行拆分、
-// 子进程环境白名单（绝不继承宿主全量环境）。
+// Package procx 子进程托管纪律单源：进程**树**执行（unix：Setpgid 建组 →
+// 超时/取消 TERM 整组 → 宽限 SIGKILL；windows：Job Object 托管整树 →
+// TerminateJobObject，语义差异见 group_windows.go 头注）、限容采集
+// （stdout/单行双上限）、stdout 按行拆分、子进程环境白名单（绝不继承宿主全量环境）。
 // acpx 各 CLI agent 适配器与 mcp/workcopy 等自行 spawn 外部命令的包共用本包，
 // 纪律只有一份。
 package procx
@@ -12,10 +13,8 @@ import (
 	"fmt"
 	"github.com/oekit/concurrency/async"
 	"io"
-	"os"
 	"os/exec"
 	"strings"
-	"syscall"
 	"time"
 )
 
@@ -80,7 +79,7 @@ func execCLI(ctx context.Context, dir string, argv []string, env []string,
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	cmd, pgidKill := newGroupCmd(cctx, dir, argv, env)
+	cmd, group := newGroupCmd(cctx, dir, argv, env)
 
 	outBuf, errBuf := newCappedBuffer(maxStdout), newCappedBuffer(0)
 	var lineW *lineWriter
@@ -92,7 +91,7 @@ func execCLI(ctx context.Context, dir string, argv []string, env []string,
 	}
 	cmd.Stderr = errBuf
 
-	waitErr, err := startAndWait(cmd, stdin, pgidKill, argv[0])
+	waitErr, err := startAndWait(cmd, stdin, group, argv[0])
 	if err != nil {
 		return "", "", -1, err
 	}
@@ -120,9 +119,9 @@ func execCLI(ctx context.Context, dir string, argv []string, env []string,
 	return noteTruncated(out, outBuf, maxStdout), errStr, 0, nil
 }
 
-// startAndWait 启动 + 异步喂 stdin + 收割（含失败兜底清组）。
-// 返回的 err 仅启动期失败（未跑到 Wait）；waitErr 为 Wait 结果。
-func startAndWait(cmd *exec.Cmd, stdin []byte, pgidKill func(syscall.Signal) error, name string) (waitErr error, err error) {
+// startAndWait 启动 + 托管进程树 + 异步喂 stdin + 收割（含失败兜底清树）。
+// 返回的 err 仅启动/托管期失败（未跑到 Wait）；waitErr 为 Wait 结果。
+func startAndWait(cmd *exec.Cmd, stdin []byte, group processGroup, name string) (waitErr error, err error) {
 	// StdinPipe 必须在 Start 之前建（os/exec 守卫：进程启动后 StdinPipe 报错，
 	// 后建等于把 payload 丢进 /dev/null——子进程实际读到空 stdin）
 	var stdinPipe io.WriteCloser
@@ -136,6 +135,18 @@ func startAndWait(cmd *exec.Cmd, stdin []byte, pgidKill func(syscall.Signal) err
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("procx: 启动 %s 失败: %w", name, err)
 	}
+	// 托管紧跟 Start：windows 要拿到 pid 才能把进程放进 Job（早于 Start 没有
+	// pid），而 unix 的 Setpgid 已在 Start 时生效，故这里对 unix 是空操作。
+	// 托管失败一律致命——不托管就兑现不了「整树收场」，故先杀再 Wait 回收，
+	// 不让一个不受管的进程树跑在后台。
+	if aerr := group.attach(); aerr != nil {
+		_ = group.kill(killForceful)
+		_ = cmd.Wait()
+		return nil, aerr
+	}
+	// 先于 Wait 注册：无论 Wait 成功还是失败，平台资源（windows 的 Job 句柄）
+	// 与可能残留的孙进程都必须收口。
+	defer group.close()
 	if stdinPipe != nil {
 		// 异步写：子进程不读 stdin 且长寿时，同步 Write 会满管道阻塞到超时才进
 		// Wait，错误分类被拖死。进程退出/被杀后 Write 得 EPIPE 自然收口。
@@ -146,42 +157,10 @@ func startAndWait(cmd *exec.Cmd, stdin []byte, pgidKill func(syscall.Signal) err
 	}
 	waitErr = cmd.Wait()
 	if waitErr != nil {
-		// 兜底清组：leader 已死，这里清的是 TERM 宽限后仍未退出的孙进程
-		_ = pgidKill(syscall.SIGKILL)
+		// 兜底清树：leader 已死，这里清的是 TERM 宽限后仍未退出的孙进程
+		_ = group.kill(killForceful)
 	}
 	return waitErr, nil
-}
-
-// newGroupCmd 建组 + 超时/取消 TERM 整组 + 宽限 SIGKILL 的命令装配。
-// 返回的 pgidKill 供 Wait 失败后兜底清组。
-func newGroupCmd(cctx context.Context, dir string, argv, env []string) (*exec.Cmd, func(syscall.Signal) error) {
-	cmd := exec.CommandContext(cctx, argv[0], argv[1:]...)
-	if dir != "" {
-		cmd.Dir = dir
-	}
-	cmd.Env = env
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-
-	// CommandContext 缺省在 ctx done 时直接 SIGKILL leader，会抢在宽限前面——
-	// 用 cmd.Cancel 接管为 TERM 整组，宽限内的 SIGKILL 由 WaitDelay 兜底
-	pgidKill := func(sig syscall.Signal) error {
-		if cmd.Process == nil {
-			return nil
-		}
-		return syscall.Kill(-cmd.Process.Pid, sig)
-	}
-	cmd.Cancel = func() error {
-		err := pgidKill(syscall.SIGTERM)
-		if err == syscall.ESRCH {
-			// 子进程恰在 deadline 触发瞬间自然退出：组已不在，Kill 返回 ESRCH。
-			// 按 os/exec 约定返回 ErrProcessDone——否则成功退出会被误当
-			// Cancel 失败，Wait 报错（第六轮审计）
-			return os.ErrProcessDone
-		}
-		return err
-	}
-	cmd.WaitDelay = killGrace
-	return cmd, pgidKill
 }
 
 // classifyWait 把 Wait 错误翻译成调用方可 errors.Is 的语义（取消/超时/失败+stderr 尾巴）。
