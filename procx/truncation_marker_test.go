@@ -78,6 +78,11 @@ func TestTruncationUnmarkedWhenUnderLimit(t *testing.T) {
 }
 
 // TestTruncationMarkedOnTimeoutPath 超时/取消路径同样要留痕（第三条返回路径）。
+//
+// 时间余量刻意放宽：本用例要求「子进程先写满 stdout、再被本地超时杀掉」，
+// 400ms 在 `-race` + 全量并行的机器上不够 `sh` 起来（子进程还没产出就被杀，
+// stdout 为空 ⇒ 误报「没留痕」）。这里要钉的是**返回路径的留痕**，不是
+// 「400ms 内能起一个进程」——故把余量给足，别把脆弱的时间边距伪装成断言。
 func TestTruncationMarkedOnTimeoutPath(t *testing.T) {
 	dir := t.TempDir()
 	// 先刷满 stdout 再长睡，让本地超时在「已截断」之后发生
@@ -85,7 +90,7 @@ func TestTruncationMarkedOnTimeoutPath(t *testing.T) {
 		"#!/bin/sh\nhead -c 200000 /dev/zero | tr '\\0' 'b'\nsleep 30\n")
 
 	stdout, _, _, err := Run(context.Background(), RunRequest{
-		Argv: []string{slow}, Dir: dir, Timeout: 400 * time.Millisecond, MaxStdout: 4096,
+		Argv: []string{slow}, Dir: dir, Timeout: 2 * time.Second, MaxStdout: 4096,
 	})
 	if !errors.Is(err, ErrTimeout) {
 		t.Fatalf("应 errors.Is ErrTimeout: %v", err)
