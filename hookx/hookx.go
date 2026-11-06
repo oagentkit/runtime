@@ -12,10 +12,16 @@
 //	hookSpecificOutput.updatedInput → 输入改写（消费方必须用改写后的输入
 //	  重走权限/许可链——hook 注入的输入不能绕过规则）
 //
-// 失败语义：hook 进程失败（超时/非零退出/stdout 非 JSON/事件名不符）按
-// 「无意见」处理不炸主流程，经 OnError 可观测——扩展点故障不该阻断业务；
-// 需要强一致的场景由调用方在 OnError 里自行收紧。子进程环境走 procx.ChildEnv
-// 白名单（绝不继承全量密钥）。
+// 失败语义：hook 进程失败（超时/非零退出/stdout 非 JSON/事件名不符）默认按
+// 「无意见」处理不炸主流程，经 OnError 可观测——扩展点故障不该阻断业务。
+//
+// 「需要强一致的场景由调用方在 OnError 里自行收紧」曾是一句做不到的承诺：
+// OnError 是纯观察者，Run 里失败即 continue，调用方没有任何办法把失败升级成
+// 阻断。现在由 Runner.FailClosedEvents 表达：列出的失事件类型上，hook 执行失败
+// 不再等于「无意见」，而是落一条**保守判定**（阻断 + 权限 deny）（hookx#34）。
+// Stop 是例外，见 failClosedResult 的说明。
+//
+// 子进程环境走 procx.ChildEnv 白名单（绝不继承全量密钥）。
 package hookx
 
 import (
@@ -120,6 +126,44 @@ type Runner struct {
 	Hooks []Hook
 	// OnError hook 执行失败回调（nil=静默容错）。
 	OnError func(h Hook, err error)
+	// FailClosedEvents 这些事件类型上「hook 执行失败」不再按「无意见」处理：
+	// 失败本身落一条保守判定（阻断 + 权限事件上 deny），把「二进制缺失/超时/
+	// 坏 JSON 静默放行」变成拒绝（hookx#34）。
+	//
+	// 只列**安全面**的事件（如 EventPreToolUse / EventPermissionRequest）。
+	// Stop 的 block 语义是反的（否决停止、继续跑），失败不能被读成「必须
+	// 继续」，故列在 FailClosedEvents 里对 Stop 不产生额外判定——失败仍经
+	// OnError 可见。
+	FailClosedEvents []Event
+}
+
+// failClosed 报告该事件类型是否要求 fail-closed。
+func (r *Runner) failClosed(event Event) bool {
+	for _, e := range r.FailClosedEvents {
+		if e == event {
+			return true
+		}
+	}
+	return false
+}
+
+// failClosedResult 把「hook 执行失败」翻译成保守判定。
+//
+// Stop 上刻意不产生判定：该事件 block 的含义是「否决停止、继续跑」，一次
+// 执行失败无法支撑「必须继续」这种强结论——把失败强扭成继续跑，与「保守」
+// 正好相反。失败在该事件上仍经 OnError 可见。
+func failClosedResult(event Event, err error) RunResult {
+	var res RunResult
+	if event == EventStop {
+		return res
+	}
+	res.BlockRequested = true
+	res.PreventContinuation = true
+	res.StopReason = fmt.Sprintf("hook 执行失败（fail-closed）: %v", err)
+	if event == EventPermissionRequest || event == EventPreToolUse {
+		res.PermissionBehavior = "deny"
+	}
+	return res
 }
 
 // Run 派发事件：顺序执行全部命中 hook 并归并（顺序确定性——先注册先执行）。
@@ -133,6 +177,9 @@ func (r *Runner) Run(ctx context.Context, event Event, payload Input) RunResult 
 		if err != nil {
 			if r.OnError != nil {
 				r.OnError(h, err)
+			}
+			if r.failClosed(event) {
+				merged.merge(failClosedResult(event, err))
 			}
 			continue
 		}
