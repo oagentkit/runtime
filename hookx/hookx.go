@@ -79,10 +79,13 @@ type Specific struct {
 
 // Output hook stdout 决策协议（未知字段忽略）。
 type Output struct {
-	Continue      *bool  `json:"continue,omitempty"`
-	StopReason    string `json:"stopReason,omitempty"`
-	Reason        string `json:"reason,omitempty"`
-	Decision      string `json:"decision,omitempty"` // "approve" | "block"
+	Continue   *bool  `json:"continue,omitempty"`
+	StopReason string `json:"stopReason,omitempty"`
+	Reason     string `json:"reason,omitempty"`
+	// Decision "approve" | "block"（大小写不敏感，两侧空白忽略）。契约外的取值
+	// 不予采纳并经 Runner.OnError 上报——静默忽略会让「hook 想拦、库当没看见」
+	// 变成无声的放行（hookx#29）。
+	Decision      string `json:"decision,omitempty"`
 	SystemMessage string `json:"systemMessage,omitempty"`
 	// 附加上下文（两种拼写都收——事实标准里两代拼写并存）。
 	AdditionalContext  string    `json:"additionalContext,omitempty"`
@@ -104,7 +107,9 @@ type RunResult struct {
 	// StopShouldContinue Stop 事件上 hook 否决停止（continue:false 或
 	// decision:block——block 分支沿用阻断语义）。
 	StopShouldContinue bool
-	// PermissionBehavior "" | "allow" | "deny"（deny 单调——保守合并）。
+	// PermissionBehavior "" | "allow" | "deny"。deny 单调，且**在两个层级上都单调**：
+	// 跨 hook 归并（merge）与单个 hook 输出内部（如 continue:false 与
+	// decision:approve 并存）都只向保守方向收敛，allow 不能覆盖已置的 deny（hookx#29）。
 	PermissionBehavior string
 	// UpdatedInput 最后一个改写输入（nil=未改写）。
 	UpdatedInput any
@@ -131,8 +136,11 @@ func (r *Runner) Run(ctx context.Context, event Event, payload Input) RunResult 
 			}
 			continue
 		}
-		res := processOutput(event, out)
+		res, perr := processOutput(event, out)
 		merged.merge(res)
+		if perr != nil && r.OnError != nil {
+			r.OnError(h, perr) // 输出越界：结果照常参与归并，但要让调用方看见
+		}
 	}
 	return merged
 }
@@ -207,15 +215,19 @@ func runHook(ctx context.Context, h Hook, payload Input) (*Output, error) {
 }
 
 // processOutput 单 hook 输出 → 结果（对标 processHookOutput）。
-func processOutput(event Event, out *Output) RunResult {
+//
+// 返回的 error 不是「执行失败」（执行失败在 runHook 那层），而是**输出越界**：
+// 目前只有 decision 取值不在契约内一种。走 OnError 可观测而不是静默忽略——
+// 静默忽略的失效形态是「hook 想拦、库当没看见」（hookx#29）。
+func processOutput(event Event, out *Output) (RunResult, error) {
 	var res RunResult
 	if out == nil {
-		return res
+		return res, nil
 	}
 	applyContinueFlag(event, out, &res)
-	applyDecision(event, out, &res)
+	err := applyDecision(event, out, &res)
 	applyContexts(out, &res)
-	return res
+	return res, err
 }
 
 // applyContinueFlag continue:false 的事件语义：非 Stop = 阻断续跑；
@@ -229,7 +241,7 @@ func applyContinueFlag(event Event, out *Output, res *RunResult) {
 		res.BlockRequested = true
 		res.StopReason = firstNonEmpty(out.StopReason, out.Reason)
 		if isPermission {
-			res.PermissionBehavior = "deny"
+			setPermission(res, "deny")
 		}
 		res.PreventContinuation = true
 		return
@@ -241,18 +253,25 @@ func applyContinueFlag(event Event, out *Output, res *RunResult) {
 
 // applyDecision decision 字段：approve 放行权限段；block 阻断（Stop 上转为
 // 否决停止并附加说明）。
-func applyDecision(event Event, out *Output, res *RunResult) {
+//
+// decision 取值按契约大小写不敏感识别（"BLOCK"/"Approve" 是常见手写形态，
+// 原实现把它们当未知值静默丢弃——hook 想拦、库当没看见，方向不安全）。
+// 契约外的取值一律不猜语义，经返回值上报 OnError。
+func applyDecision(event Event, out *Output, res *RunResult) error {
 	isPermission := event == EventPermissionRequest || event == EventPreToolUse
-	switch out.Decision {
+	decision := strings.ToLower(strings.TrimSpace(out.Decision))
+	switch decision {
+	case "":
+		return nil
 	case "approve":
 		if isPermission {
-			res.PermissionBehavior = "allow"
+			setPermission(res, "allow") // deny 单调：不覆盖 continue:false 已置的 deny
 		}
 	case "block":
 		res.BlockRequested = true
 		res.StopReason = firstNonEmpty(out.StopReason, out.Reason, out.SystemMessage)
 		if isPermission {
-			res.PermissionBehavior = "deny"
+			setPermission(res, "deny")
 		}
 		// PreventContinuation 的语义是「该事件不允许继续」，只对
 		// PreToolUse/PermissionRequest 成立（见 RunResult 字段文档）。Stop 事件上
@@ -264,7 +283,7 @@ func applyDecision(event Event, out *Output, res *RunResult) {
 		// PreventContinuation 并收口，Stop 落到否决停止分支。
 		if event != EventStop {
 			res.PreventContinuation = true
-			return
+			return nil
 		}
 		res.StopShouldContinue = true
 		if out.SystemMessage != "" {
@@ -273,7 +292,26 @@ func applyDecision(event Event, out *Output, res *RunResult) {
 		if out.Reason != "" {
 			res.AdditionalContexts = append(res.AdditionalContexts, out.Reason)
 		}
+	default:
+		return fmt.Errorf("hookx: hook 返回的 decision=%q 不在契约内（只支持 approve/block，大小写不敏感）；"+
+			"该值不予采纳——需要拦截请用 block 或 continue:false", out.Decision)
 	}
+	return nil
+}
+
+// setPermission PermissionBehavior 的唯一写入口，deny 单调：allow 不得覆盖
+// 已置的 deny。
+//
+// 单个 hook 的输出可以自相矛盾（`continue:false` + `decision:"approve"`），
+// 两个字段写的是同一个 res；原先后置的 approve 直接顶掉先置的 deny，于是
+// **同一个输出内部是「放行优先」，而跨 hook 归并（merge）是「deny 单调」**
+// ——同一份语义在两个层级上方向相反，且相反的那个方向不安全（hookx#29）。
+// 现在两层同口径：权限面只向保守方向收敛。
+func setPermission(res *RunResult, behavior string) {
+	if behavior == "allow" && res.PermissionBehavior == "deny" {
+		return
+	}
+	res.PermissionBehavior = behavior
 }
 
 // applyContexts 附加上下文与 UpdatedInput 透传。
