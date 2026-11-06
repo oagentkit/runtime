@@ -55,12 +55,16 @@ func (b *Bus[T]) Publish(e T) {
 // 此前手动 cancel 只删 channel 不唤醒监听 goroutine，ctx 为 Background 时
 // 每个订阅者永久泄漏一个 goroutine + 一条残留 channel。
 //
-// ⚠️ channel **永不关闭**（oagentkit/runtime#20）：unsubscribe/ctx 结束只摘
-// 注册，不 close(ch)。消费方 for-range 必须自带退出分支（select ctx.Done() /
-// cancel 后退出），裸 `for range ch` 会永久阻塞。刻意不 close：Publish 在
-// 遍历 subs 时持的是 channel 引用，close 与并发 send 的竞窗（send on closed
-// channel panic）在无全局停顿的前提下不可消除——用阻塞风险换 panic 风险
-// 不划算，契约写明白交给消费方。
+// channel 在**退订/ctx 结束时关闭**（runtime#32，此前是 #20 的「永不关闭」）：
+// `for range ch` 可正常退出，也不会再把已缓冲事件挂在无人消费的 channel 上。
+//
+// 旧实现不 close 的理由是「close 与并发 send 的竞窗不可消除」——这个前提是错的：
+// Publish 遍历并发送时持 b.mu，unsubscribe 摘注册与 close 也在 b.mu 内，
+// 两者**同锁互斥** ⇒ 不存在「send 到已关闭 channel」的窗口，close 是安全的。
+//
+// ⚠️ 消费方契约随之改变：select 消费必须检查 ok（`v, ok := <-ch`）。
+// 关闭后该 case 恒可就绪并反复给出零值，写 `case v := <-ch:` 而不查 ok 的
+// 循环会空转——这是 Go 里所有可关闭 channel 的通用前提，不是本包的额外要求。
 func (b *Bus[T]) Subscribe(ctx context.Context) (<-chan T, func()) {
 	if b == nil {
 		return nil, func() {}
@@ -72,11 +76,19 @@ func (b *Bus[T]) Subscribe(ctx context.Context) (<-chan T, func()) {
 
 	var once sync.Once
 	stop := make(chan struct{})
+	// 全部收进 once：delete 与 close 必须**只发生一次**。此前只有 close(stop)
+	// 在 once 里，摘注册在外面 ⇒ 重复调 cancel 会二次 close(ch) panic
+	// （关闭 channel 之前这个重复 delete 是幂等的，close 之后就不是了）。
 	unsubscribe := func() {
-		once.Do(func() { close(stop) })
-		b.mu.Lock()
-		delete(b.subs, ch)
-		b.mu.Unlock()
+		once.Do(func() {
+			close(stop)
+			b.mu.Lock()
+			delete(b.subs, ch)
+			// 持锁 close：与 Publish 的持锁 send 互斥（见函数上方契约）。
+			// 已入缓冲的事件不受影响——range 会先把它们取完再退出。
+			close(ch)
+			b.mu.Unlock()
+		})
 	}
 	async.GoWithContext(ctx, func(ctx context.Context) {
 		select {

@@ -63,14 +63,23 @@ func TestSubscribeCtxCleanup(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	ch, _ := b.Subscribe(ctx)
 	cancel()
-	// ctx 取消后订阅自动注销
-	time.Sleep(10 * time.Millisecond)
-	// 发一个事件，不应有任何订阅者收到
+	// 等注销落定：channel 被关闭即证明 unsubscribe 已执行（close 与 delete
+	// 在同一个 once 内完成）。unsubscribe 跑在监听 goroutine 里，是异步的。
+	deadline := time.Now().Add(time.Second)
+	for {
+		_, open := recvNow(ch)
+		if !open {
+			break // 已关闭
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("ctx 取消后订阅 channel 未在 1s 内关闭（for range 会永久阻塞）")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	// 注销之后再发一个事件：已关闭的 channel 不该再收到任何东西
 	b.Publish(testEvent{Type: "x"})
-	select {
-	case <-ch:
-		t.Fatal("ctx 取消后不应收到事件")
-	default:
+	if v, ok := <-ch; ok {
+		t.Fatalf("注销后不应再收到事件: %+v", v)
 	}
 }
 
@@ -147,4 +156,19 @@ func TestPublishDropCounted(t *testing.T) {
 	}
 	// 不消费 ch，直接校验计数即可
 	_ = ch
+}
+
+// recvNow 非阻塞取一个事件：返回 (事件或 nil, channel 是否仍开启)。
+// 关闭后 `<-ch` 恒可就绪并给零值——所以判断「还有没有事件」必须看 ok 而不是
+// 看能不能取到（runtime#32 的契约变更点）。
+func recvNow[T any](ch <-chan T) (*T, bool) {
+	select {
+	case v, ok := <-ch:
+		if !ok {
+			return nil, false
+		}
+		return &v, true
+	default:
+		return nil, true
+	}
 }
