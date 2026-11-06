@@ -110,14 +110,34 @@ func execCLI(ctx context.Context, dir string, argv []string, env []string,
 		// WaitDelay 到点强关管道所致（os/exec 语义：Cancel 未被调用 + 退出成功时
 		// 才返回）。组已被 startAndWait 兜底 SIGKILL 清理——这是一次成功执行，
 		// 不是失败（npm 类包装器守护化后台进程曾把成功跑整体误判为失败；
-		// 第六轮审计）。
-		if errors.Is(waitErr, exec.ErrWaitDelay) && ctx.Err() == nil {
+		// 第六轮审计）。成功特判的**完整条件**见 waitDelayIsBenign。
+		if waitDelayIsBenign(ctx, cctx, waitErr) {
 			return noteTruncated(out, outBuf, maxStdout), errStr, 0, nil
 		}
 		return out, errStr, exitStatus(waitErr),
 			classifyWait(ctx, cctx, argv[0], waitErr, errBuf, timeout)
 	}
 	return noteTruncated(out, outBuf, maxStdout), errStr, 0, nil
+}
+
+// waitDelayIsBenign 报告 ErrWaitDelay 是否属于「成功执行 + 孙进程握管道」的
+// 良性形态（runtime#35）。
+//
+// 三个条件缺一不可：
+//   - waitErr 是 exec.ErrWaitDelay（否则本次失败与 WaitDelay 无关）；
+//   - ctx.Err() == nil：调用方没取消（自己取消的 deadline 也归 ErrCanceled，
+//     那是一次被中止的执行，不是成功）；
+//   - cctx.Err() == nil：**本地 Timeout 没到**。这一条此前缺失，而它恰是
+//     ErrWaitDelay 最可能出现的时刻——leader 恰在本地超时点以 0 退出、孙进程
+//     仍握管道时，`ctx`（调用方 ctx）确实是干净的，只有 `cctx`（WithTimeout
+//     派生）已 DeadlineExceeded。只看 ctx ⇒ 被超时终止的执行被上报为
+//     「exit 0 成功」，ErrTimeout 语义整条丢失，调用方以为命令跑完了。
+//
+// 为什么单独成函数：这个判据的正确性取决于「两个 ctx 分别代表谁」，而
+// 端到端的竞态窗口（超时点与 leader 退出点重合）无法用真实进程稳定复现——
+// 把判据抽出来才能用构造的 ctx 逐条钉死，e2e 用例只管良性路径仍绿。
+func waitDelayIsBenign(ctx, cctx context.Context, waitErr error) bool {
+	return errors.Is(waitErr, exec.ErrWaitDelay) && ctx.Err() == nil && cctx.Err() == nil
 }
 
 // startAndWait 启动 + 异步喂 stdin + 收割（含失败兜底清组）。
