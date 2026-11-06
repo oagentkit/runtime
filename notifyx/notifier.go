@@ -2,6 +2,7 @@ package notifyx
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -15,8 +16,20 @@ type Notifier struct {
 	sink Sink
 
 	queue chan Payload
+	// sendMu 串行化「closed 检查 + 入队」与「置 closed + close(queue)」。
+	//
+	// 此前两者之间是 check-then-act 竞窗：Emit 读到 closed=false，Close 随即
+	// close(queue)，Emit 再 send ⇒ `send on closed channel` **进程级 panic**
+	// （select 的 send case 对已关闭 channel 照样 panic，不提供保护）。注释
+	// 宣称的「closed 置位后 Emit 一律丢弃」当时并不成立（notifyx#28）。
+	// 现在检查与入队在同一把锁内，close 也在锁内，竞窗不可达。
+	sendMu sync.RWMutex
 	// closed 置位后 Emit 一律丢弃（防向已关闭队列发送 panic）。
-	closed    atomic.Bool
+	closed atomic.Bool
+	// space 队列腾出容量信号（容量 1）：EmitWait 等它而不是轮询睡眠。
+	// deliverLoop 每取走一件非阻塞投一个（满了就丢——信号是「可能有空位」，
+	// 不是计数，等待方醒来重试即可）。
+	space     chan struct{}
 	startOnce sync.Once
 	closeOnce sync.Once
 	done      chan struct{}
@@ -79,6 +92,7 @@ func NewNotifier(sink Sink, opts ...NotifierOption) *Notifier {
 		baseDelay:   500 * time.Millisecond,
 		maxDelay:    30 * time.Second,
 		queueSize:   256,
+		space:       make(chan struct{}, 1),
 	}
 	for _, o := range opts {
 		o(n)
@@ -111,17 +125,9 @@ func (n *Notifier) Emit(p Payload) {
 		n.drop(p, errInvalidPayload)
 		return
 	}
-	n.startOnce.Do(func() {
-		async.GoSafe(func() { n.deliverLoop() })
-	})
-	if n.closed.Load() {
-		n.drop(p, errClosed)
-		return
-	}
-	select {
-	case n.queue <- p:
-	default:
-		n.drop(p, errQueueFull)
+	n.startLoop()
+	if err := n.enqueue(p); err != nil {
+		n.drop(p, err)
 	}
 }
 
@@ -133,19 +139,52 @@ func (n *Notifier) EmitWait(ctx context.Context, p Payload) error {
 		n.drop(p, errInvalidPayload)
 		return errInvalidPayload
 	}
+	n.startLoop()
+	for {
+		err := n.enqueue(p)
+		if err == nil {
+			return nil
+		}
+		if errors.Is(err, errClosed) {
+			n.drop(p, err)
+			return err
+		}
+		// 队列满：等 deliverLoop 取走一件（事件驱动，不轮询睡眠）。
+		// 等待期间**不持锁**——否则 Close 会卡在一个被慢 sink 堵住的
+		// EmitWait 后面，连带 Close 的 ctx 限期失效。
+		select {
+		case <-n.space:
+		case <-ctx.Done():
+			n.drop(p, ctx.Err())
+			return ctx.Err()
+		}
+	}
+}
+
+// startLoop 惰性启动投递 goroutine（GoSafe：通知面故障不炸业务）。
+func (n *Notifier) startLoop() {
 	n.startOnce.Do(func() {
 		async.GoSafe(func() { n.deliverLoop() })
 	})
+}
+
+// enqueue 把载荷投入出站队列：**closed 检查与 send 在同一把读锁内**，Close 的
+// 「置 closed + close(queue)」在同一把写锁内 ⇒ 不存在「检查后关闭」的竞窗
+// （notifyx#28）。返回 errClosed / errQueueFull 供调用方分别计数。
+//
+// 只做非阻塞投递（select + default）：Emit 的「永不阻塞主流程」由此成为结构性
+// 事实，阻塞语义由 EmitWait 在外层用 space 信号自己实现。
+func (n *Notifier) enqueue(p Payload) error {
+	n.sendMu.RLock()
+	defer n.sendMu.RUnlock()
 	if n.closed.Load() {
-		n.drop(p, errClosed)
 		return errClosed
 	}
 	select {
 	case n.queue <- p:
 		return nil
-	case <-ctx.Done():
-		n.drop(p, ctx.Err())
-		return ctx.Err()
+	default:
+		return errQueueFull
 	}
 }
 
@@ -153,6 +192,10 @@ func (n *Notifier) EmitWait(ctx context.Context, p Payload) error {
 func (n *Notifier) deliverLoop() {
 	defer close(n.done)
 	for p := range n.queue {
+		select { // 让出容量信号（非阻塞：满即丢，等待方醒来会重试）
+		case n.space <- struct{}{}:
+		default:
+		}
 		n.deliver(p)
 	}
 }
@@ -213,9 +256,14 @@ func (n *Notifier) Dropped() int64 { return n.dropped.Load() }
 // Close 停收新件并排空队列（限期由 ctx 控制；超时未排完的部分按丢弃计）。
 func (n *Notifier) Close(ctx context.Context) error {
 	n.closeOnce.Do(func() {
+		n.sendMu.Lock() // 与 enqueue 的「检查 + send」互斥：锁内 close 才安全
+		defer n.sendMu.Unlock()
 		n.closed.Store(true)
 		close(n.queue)
 	})
+	// 从没 Emit 过就 Close 时也必须把投递循环拉起来：drain 靠它跑完，
+	// done 靠它关闭——否则 Close 永远等一个不存在的 goroutine（挂死）。
+	n.startLoop()
 	select {
 	case <-n.done:
 		return nil
