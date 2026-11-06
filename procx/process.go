@@ -104,7 +104,16 @@ func execCLI(ctx context.Context, dir string, argv []string, env []string,
 		lineW.partial = nil
 	}
 
-	out, errStr := outBuf.buf.String(), errBuf.buf.String()
+	// 截断留痕在**所有**返回路径之前统一盖上（runtime#38）：此前只有成功路径
+	// 过 noteTruncated，非零退出/超时/取消路径裸返 out —— 失败现场被裁剪到
+	// maxStdout 却没有任何标记，排障时把「截断导致看不到结论」误读成
+	// 「命令没输出结论」。放在这里而不是逐个 return 补，是为了让「任何路径
+	// 都带标记」成为结构性事实，而不是三处各写一遍的自觉。
+	//
+	// stderr 同病同治：它的上限是 maxChildStdout（8MB），此前两条路径都不标记。
+	// 与 stdout 的唯一区别是它的缺省上限取自函数内的缺省值（传 0）。
+	out, errStr := noteTruncated(outBuf.buf.String(), outBuf, maxStdout),
+		noteTruncated(errBuf.buf.String(), errBuf, 0)
 	if waitErr != nil {
 		// ErrWaitDelay：leader 已成功退出，但遗留的后台孙进程仍握 stdout 写端，
 		// WaitDelay 到点强关管道所致（os/exec 语义：Cancel 未被调用 + 退出成功时
@@ -112,12 +121,12 @@ func execCLI(ctx context.Context, dir string, argv []string, env []string,
 		// 不是失败（npm 类包装器守护化后台进程曾把成功跑整体误判为失败；
 		// 第六轮审计）。成功特判的**完整条件**见 waitDelayIsBenign。
 		if waitDelayIsBenign(ctx, cctx, waitErr) {
-			return noteTruncated(out, outBuf, maxStdout), errStr, 0, nil
+			return out, errStr, 0, nil
 		}
 		return out, errStr, exitStatus(waitErr),
 			classifyWait(ctx, cctx, argv[0], waitErr, errBuf, timeout)
 	}
-	return noteTruncated(out, outBuf, maxStdout), errStr, 0, nil
+	return out, errStr, 0, nil
 }
 
 // waitDelayIsBenign 报告 ErrWaitDelay 是否属于「成功执行 + 孙进程握管道」的
