@@ -96,6 +96,9 @@ type RunResult struct {
 	// BlockRequested 任一 hook 请求阻断。
 	BlockRequested bool
 	// PreventContinuation 阻断且该事件不允许继续（PreToolUse/PermissionRequest）。
+	// **Stop 事件上恒为 false**：Stop 的 block 语义是「否决停止、继续跑」，
+	// 由 StopShouldContinue 表达。两者不可能同时为真——通用处理若按
+	// 「PreventContinuation → 不继续」分派，同时置位会把语义读反（runtime#33）。
 	PreventContinuation bool
 	StopReason          string
 	// StopShouldContinue Stop 事件上 hook 否决停止（continue:false 或
@@ -251,15 +254,24 @@ func applyDecision(event Event, out *Output, res *RunResult) {
 		if isPermission {
 			res.PermissionBehavior = "deny"
 		}
-		res.PreventContinuation = true
-		if event == EventStop {
-			res.StopShouldContinue = true
-			if out.SystemMessage != "" {
-				res.AdditionalContexts = append(res.AdditionalContexts, out.SystemMessage)
-			}
-			if out.Reason != "" {
-				res.AdditionalContexts = append(res.AdditionalContexts, out.Reason)
-			}
+		// PreventContinuation 的语义是「该事件不允许继续」，只对
+		// PreToolUse/PermissionRequest 成立（见 RunResult 字段文档）。Stop 事件上
+		// block 的含义**相反**——是「否决停止、继续跑」（StopShouldContinue）。
+		// 两者同时为 true 会让通用处理「PreventContinuation → 不继续」把
+		// 「要求继续」读成「禁止继续」，语义 180 度反转（runtime#33）。
+		//
+		// 这里与上面 continue:false 的处理保持逐字同构：非 Stop 才置
+		// PreventContinuation 并收口，Stop 落到否决停止分支。
+		if event != EventStop {
+			res.PreventContinuation = true
+			return
+		}
+		res.StopShouldContinue = true
+		if out.SystemMessage != "" {
+			res.AdditionalContexts = append(res.AdditionalContexts, out.SystemMessage)
+		}
+		if out.Reason != "" {
+			res.AdditionalContexts = append(res.AdditionalContexts, out.Reason)
 		}
 	}
 }
