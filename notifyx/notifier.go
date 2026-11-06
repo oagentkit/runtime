@@ -89,13 +89,24 @@ func NewNotifier(sink Sink, opts ...NotifierOption) *Notifier {
 	return n
 }
 
+// stamp 零值 Timestamp 补 now（UTC）：Payload.Timestamp 的契约是「Emit 时零值
+// 自动补 now」——调用方不填才是常规形态。
+//
+// 两个入口共用这一份实现是刻意的：此前两处各写一遍、条件一起写反（
+// `if !p.Timestamp.IsZero()` 才补 ⇒ 零值永远补不上、`omitempty` 把字段整个
+// 序列化掉，下游按时间排序/过滤/窗口全哑），单写一处不会再漂（agent#27）。
+// 非零值一律保留——调用方自带的事件时刻优先于本地时钟。
+func stamp(p *Payload) {
+	if p.Timestamp.IsZero() {
+		p.Timestamp = time.Now().UTC()
+	}
+}
+
 // Emit 异步外发（非阻塞）：入出站队列即返回。队列满或已关闭时丢弃计数并
 // 触发 OnDrop——通知不能阻塞主流程，丢弃是显式计量的代价。零值 Timestamp
 // 自动补齐。
 func (n *Notifier) Emit(p Payload) {
-	if !p.Timestamp.IsZero() {
-		p.Timestamp = time.Now().UTC()
-	}
+	stamp(&p)
 	if !p.Valid() {
 		n.drop(p, errInvalidPayload)
 		return
@@ -117,9 +128,7 @@ func (n *Notifier) Emit(p Payload) {
 // EmitWait 背压形态：阻塞直到入队或 ctx 结束——「等人工」类必须送达的通知
 // 用这个（代价是主流程让出一段并发度）。其余语义同 Emit。
 func (n *Notifier) EmitWait(ctx context.Context, p Payload) error {
-	if !p.Timestamp.IsZero() {
-		p.Timestamp = time.Now().UTC()
-	}
+	stamp(&p)
 	if !p.Valid() {
 		n.drop(p, errInvalidPayload)
 		return errInvalidPayload
