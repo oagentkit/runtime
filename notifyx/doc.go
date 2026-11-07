@@ -24,6 +24,8 @@
 //	session_end        ← 平台显式会话结束信号（无挂点的平台不映射）
 //
 // 消费方只配 URL + 凭证，不再写事件翻译（oagentkit/runtime#18）。
+// 挂点侧（stdin/argv 的 shell 协议 → 本契约）的官方 shim 在 notifyx/hook
+// 子包（含 notifyx-hook 命令行），映射表与本文档同源同测。
 //
 // # 可靠外发
 //
