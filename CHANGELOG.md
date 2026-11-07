@@ -2,6 +2,42 @@
 
 > 本文件由 `matrix-tools/scripts/gen_changelogs.py` 从 git 历史生成，按 tag 切段、取每段内的 conventional commit 渲染。
 
+## [v0.11.0] — 2026-11-07
+
+### 新增(notifyx)：官方 hook shim——notifyx/hook 归一化映射表+跨进程节流+notifyx-hook 命令行（#36）
+
+notifyx 的 Go 库契约已标准化，但平台挂点是 stdin-JSON/argv 的 shell 协议，
+消费方（octopus script/octopus-notify.sh 实证）在 bash 里二次实现映射表/
+ack 轮询/节流。本提交补上挂点侧官方对称物：
+- notifyx/hook 子包：Normalize 把平台载荷归一化为 notifyx.Payload，映射表
+  是主包 doc.go 那张表的可执行单源（hook_test.go 逐条同测钉两边）；事件名
+  归形后查精确表，未命中走「类/failure 类」兜底，仍命中不了显式报错。
+- Throttler：文件时间戳跨进程节流，键 agent+session+event（比实证脚本的
+  agent+会话收紧一维），窗口可配（缺省 5s），fail-open。
+- cmd/notifyx-hook：一行接入。ack 轮询直接组合主包 PollAck+HTTPAckEndpoint
+  （缺省同款：间隔 2s、连续失败上限 5）。退出码契约：0 送达/节流跳过/
+  approve/done，2 输入错误，3 外发失败，4 ack 轮询失败/超时，5 deny。
+用法：
+  notifyx-hook --agent zcode --url https://notify.example/hook \
+      --header "Authorization: Bearer $TOKEN" < payload.json
+安装：go install github.com/oagentkit/runtime/notifyx/hook/cmd/notifyx-hook@latest
+close #36
+
+- 杂务(deps)：依赖地板追到最新——github.com/oekit/pkg v0.36.0
+
+| 依赖 | 现地板 | 抬到 |
+|---|---|---|
+| `github.com/oekit/pkg` | `v0.35.2` | `v0.36.0` |
+## 为什么
+矩阵的**发版时刻地板时效**门禁（`verify_tag_floor --ref HEAD`）要求：各仓 HEAD
+（= 下次发版会发出去的内容）的依赖地板，相对那一刻的依赖最新版本，不能已落后。
+oekit 基座与矩阵模块都在高频发版 ⇒ 地板是**跑步机**，落后一格就会判红。
+## 兼容性实测
+本工具在提交前跑完 `go build` / `go vet` / `go test -race -count=1 ./...`（全绿才提交）
+与 `go mod tidy -diff`（无漂移）⇒ 改动**只影响依赖版本**，零行为差异。
+只改 `go.mod` / `go.sum` ⇒ 不需要 CHANGELOG 条目（版本段由下次发版的 `prewrite` 生成）。
+
+
 ## [v0.10.0] — 2026-11-07
 
 ### 新增(procx)：新增 InheritAllExcept——可信父进程场景不再靠白名单补枚举（#26）
