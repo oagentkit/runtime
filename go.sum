@@ -1,4 +1,4 @@
 github.com/oekit/concurrency v0.27.0 h1:UPx830GDhEZfMZbltuK+uP78v6bZ5FGTg8Gr99xnfEE=
 github.com/oekit/concurrency v0.27.0/go.mod h1:iUFvO18Z7YztWu8BTrgserAqtRumT+KexgP9NUWhGDg=
-github.com/oekit/pkg v0.35.2 h1:XCBsgbS8wpViNrRMeBxWFRyY1C7ZG+Z0hFd9xEvlfMk=
-github.com/oekit/pkg v0.35.2/go.mod h1:sVeOtmG1sLY2aSnzFIbUAF2Qoh7G8R5vnWtWmLCv8NM=
+github.com/oekit/pkg v0.36.0 h1:1WR7FRHWVS3ZE2VwWzA0ZNJ6YGn0OvOglzvx+gfxs6c=
+github.com/oekit/pkg v0.36.0/go.mod h1:sVeOtmG1sLY2aSnzFIbUAF2Qoh7G8R5vnWtWmLCv8NM=
