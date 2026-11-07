@@ -2,6 +2,71 @@
 
 > 本文件由 `matrix-tools/scripts/gen_changelogs.py` 从 git 历史生成，按 tag 切段、取每段内的 conventional commit 渲染。
 
+## [v0.12.0] — 2026-11-07
+
+### 新增(procx)：windows 进程树支持——Job Object 落地，解除 windows/amd64 编不过
+
+本包此前只有 POSIX 实现：newGroupCmd 直接写 syscall.SysProcAttr{Setpgid: true}，
+pgidKill 直接调 syscall.Kill(-pid, sig)。两处都是 unix 专有符号，于是任何
+GOOS=windows 的下游都编不过：
+  process.go:163: unknown field 'Setpgid' in struct literal of type syscall.SysProcAttr
+  process.go:171: undefined: syscall.Kill
+这个缺口在宿主侧已经暴露过（agent-harness 的交叉构建门禁反向验证时撞上），
+而下游能做的只有「显式声明不支持 windows」——把缺口写清楚，不是关掉它。
+# 做法：机制按平台拆开，调用面只认三个动作
+procx 的承诺是「超时/取消后整棵进程树一起收场」，而不是只杀直接子进程。
+这条承诺在两个平台上必须用不同机制兑现，故拆成：
+  group.go          调用面：killMode（graceful/forceful）+ processGroup 接口
+                    （attach / kill / close）+ errGroupGone 哨兵
+  group_unix.go     Setpgid 建组 → TERM 整组 → 宽限 SIGKILL（原逻辑逐字搬运）
+  group_windows.go  Job Object 装树 → TerminateJobObject 整树终止
+process.go 只认 attach/kill/close：Cancel 接管、WaitDelay 宽限、Wait 失败后
+兜底清树、defer close 收口——平台差异不再泄进主流程。
+# Windows 为什么用 Job Object
+Windows 没有 pgid、没有 SIGTERM/SIGKILL，也没有 syscall.Kill。按 pid 逐个
+Kill 拿不到孙进程，而孙进程残留正是本包要防的那类缺陷（包装器类命令常把
+真实工作进程守护化到后台，TestRunLeaderExitsWithDaemonGrandchild 锁的就是
+这个场景）。Job Object 是 Windows 上唯一能把「一棵树」当作一个单元终止的
+内核机制，故 attach 时 CreateJobObject + AssignProcessToJobObject，终止时
+TerminateJobObject。
+# 如实声明的语义降级（不假装等价）
+1. 没有优雅终止档。Windows 无 SIGTERM 等价物，killGraceful 退化为整树强制
+   终止：「TERM → 宽限 3s → KILL」变成「立即终止」。killGrace 仍生效，但它
+   兜的只剩 WaitDelay 的管道收口。
+2. 不设 JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE。那需要 SetInformationJobObject
+   与按位布局的结构体（32/64 位大小不同），而本仓 CI 不在 Windows 上跑，
+   无法验证布局正确性；布局写错时 SetInformationJobObject 只回一个 bool，
+   静默失败比不做更危险。替代做法是正常路径与错误路径都显式
+   TerminateJobObject（kill / close），覆盖「孙进程残留」这一实际失效模式。
+   宿主进程被强杀时 Job 不会自动清树——这是与 unix 侧的已知差别。
+# 验证
+  CGO_ENABLED=0 go build ./...                           （darwin，绿）
+  CGO_ENABLED=0 GOOS=windows  GOARCH=amd64 go build ./... （绿，改前红）
+  CGO_ENABLED=0 GOOS=linux    GOARCH=arm64 go build ./... （绿）
+  CGO_ENABLED=0 GOOS=windows  GOARCH=amd64 go vet ./procx （绿）
+  CGO_ENABLED=1 go test ./procx -count=1 -race            （绿，unix 行为未变）
+  CGO_ENABLED=1 go test ./...    -count=1                 （全仓绿）
+新增 procx/group_windows_test.go 并**如实标注**：这两个用例没有在真机上跑过
+（本仓 CI 只有 ubuntu runner），编译期由 GOOS=windows go vet 保证，运行期
+留给第一个在 Windows 上跑本仓的人。一条没跑过的用例不该被当成证据。
+无新增依赖：Job Object 走 stdlib syscall 的 LazyDLL，故 tier0 的依赖地板不变。
+
+- 杂务(deps)：依赖地板追到最新——github.com/oekit/concurrency v0.28.0
+
+| 依赖 | 现地板 | 抬到 |
+|---|---|---|
+| `github.com/oekit/concurrency` | `v0.27.0` | `v0.28.0` |
+| `github.com/oekit/pkg` | `v0.36.0` | `v0.37.1` |
+## 为什么
+矩阵的**发版时刻地板时效**门禁（`verify_tag_floor --ref HEAD`）要求：各仓 HEAD
+（= 下次发版会发出去的内容）的依赖地板，相对那一刻的依赖最新版本，不能已落后。
+oekit 基座与矩阵模块都在高频发版 ⇒ 地板是**跑步机**，落后一格就会判红。
+## 兼容性实测
+本工具在提交前跑完 `go build` / `go vet` / `go test -race -count=1 ./...`（全绿才提交）
+与 `go mod tidy -diff`（无漂移）⇒ 改动**只影响依赖版本**，零行为差异。
+只改 `go.mod` / `go.sum` ⇒ 不需要 CHANGELOG 条目（版本段由下次发版的 `prewrite` 生成）。
+
+
 ## [v0.11.0] — 2026-11-07
 
 ### 新增(notifyx)：官方 hook shim——notifyx/hook 归一化映射表+跨进程节流+notifyx-hook 命令行（#36）
