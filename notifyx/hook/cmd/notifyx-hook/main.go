@@ -88,18 +88,18 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return exitInput
 	}
 	if *agent == "" || *url == "" {
-		fmt.Fprintln(stderr, "notifyx-hook: --agent 与 --url 必填")
+		_, _ = fmt.Fprintln(stderr, "notifyx-hook: --agent 与 --url 必填")
 		return exitInput
 	}
 
 	data, err := readPayload(fs, *argPayload, stdin)
 	if err != nil {
-		fmt.Fprintln(stderr, "notifyx-hook:", err)
+		_, _ = fmt.Fprintln(stderr, "notifyx-hook:", err)
 		return exitInput
 	}
 	p, err := hook.Normalize(hook.Agent(*agent), data)
 	if err != nil {
-		fmt.Fprintln(stderr, "notifyx-hook:", err)
+		_, _ = fmt.Fprintln(stderr, "notifyx-hook:", err)
 		return exitInput
 	}
 	// CLI 侧覆盖优先于 payload 提取值：会话/仓库维度 hooks 配置比事件载荷可靠。
@@ -116,10 +116,10 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	)
 	allowed, err := th.Allow(*agent, p.SessionID, string(p.Event))
 	if err != nil {
-		fmt.Fprintln(stderr, "notifyx-hook:", err)
+		_, _ = fmt.Fprintln(stderr, "notifyx-hook:", err)
 	}
 	if !allowed {
-		fmt.Fprintf(stderr, "notifyx-hook: 节流窗口 %s 内重复的 %s/%s，跳过外发\n", *throttleWindow, *agent, p.Event)
+		_, _ = fmt.Fprintf(stderr, "notifyx-hook: 节流窗口 %s 内重复的 %s/%s，跳过外发\n", *throttleWindow, *agent, p.Event)
 		return exitOK
 	}
 
@@ -133,22 +133,22 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	n := notifyx.NewNotifier(sink, notifyx.WithOnDrop(func(_ notifyx.Payload, err error) { dropErr = err }))
 	// 「等人工」类必须送达：用 EmitWait 背压形态而不是 Emit 的尽力丢弃。
 	if err := n.EmitWait(context.Background(), p); err != nil {
-		fmt.Fprintln(stderr, "notifyx-hook: 外发失败:", err)
+		_, _ = fmt.Fprintln(stderr, "notifyx-hook: 外发失败:", err)
 		return exitSend
 	}
 	if err := n.Close(context.Background()); err != nil {
-		fmt.Fprintln(stderr, "notifyx-hook: 排空失败:", err)
+		_, _ = fmt.Fprintln(stderr, "notifyx-hook: 排空失败:", err)
 		return exitSend
 	}
 	if n.Delivered() != 1 {
-		fmt.Fprintln(stderr, "notifyx-hook: 外发失败（重试耗尽）:", dropErr)
+		_, _ = fmt.Fprintln(stderr, "notifyx-hook: 外发失败（重试耗尽）:", dropErr)
 		return exitSend
 	}
 	if *ackURL == "" {
 		return exitOK
 	}
 	if p.SessionID == "" {
-		fmt.Fprintln(stderr, "notifyx-hook: ack 轮询需要 session_id（payload 或 --session-id）")
+		_, _ = fmt.Fprintln(stderr, "notifyx-hook: ack 轮询需要 session_id（payload 或 --session-id）")
 		return exitInput
 	}
 
@@ -163,15 +163,16 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		notifyx.WithPollMaxConsecutiveFails(*ackMaxFails),
 	)
 	if err != nil {
-		fmt.Fprintln(stderr, "notifyx-hook: ack 轮询失败:", err)
+		_, _ = fmt.Fprintln(stderr, "notifyx-hook: ack 轮询失败:", err)
 		return exitAckPoll
 	}
 	out, err := json.Marshal(ack)
 	if err != nil {
-		fmt.Fprintln(stderr, "notifyx-hook: ack 序列化失败:", err)
+		_, _ = fmt.Fprintln(stderr, "notifyx-hook: ack 序列化失败:", err)
 		return exitAckPoll
 	}
-	fmt.Fprintln(stdout, string(out))
+	// ack 回执打到 stdout 供 bash 消费（$? 分派 + $(...) 取 JSON）。
+	_, _ = fmt.Fprintln(stdout, string(out))
 	if ack.Decision == "deny" {
 		return exitAckDeny
 	}
