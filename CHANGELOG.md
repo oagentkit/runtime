@@ -2,6 +2,12 @@
 
 > 本文件由 `matrix-tools/scripts/gen_changelogs.py` 从 git 历史生成，按 tag 切段、取每段内的 conventional commit 渲染。
 
+## [v0.12.3] — 2026-11-08
+
+### 修复(procx,hookx)：收编 OnLine 回调 panic / 抢救失败 hook 的已出口决策 / 修正超时误报取消
+
+Merge branch 'main' into fix/audit-issues-70-69-63
+
 ## [v0.12.2] — 2026-11-08
 
 - 杂务(deps)：依赖地板追到最新——github.com/oekit/concurrency v0.28.4
