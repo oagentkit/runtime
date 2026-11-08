@@ -81,6 +81,31 @@ func TestThrottlerDisabled(t *testing.T) {
 	}
 }
 
+// WithThrottleDir("") 空值守卫（runtime#84）：空串语义是「保持缺省目录」，
+// 不是「把目录覆盖成空串」——后者让 MkdirAll 必败、Allow 每次走 fail-open
+// 放行，节流整体静默失效。环境变量全部指进临时目录隔离：断言用的是缺省
+// 目录本身，绝不触碰真实用户缓存。
+func TestWithThrottleDirEmptyKeepsDefault(t *testing.T) {
+	cache := t.TempDir()
+	t.Setenv("XDG_CACHE_HOME", cache) // linux
+	t.Setenv("HOME", cache)           // darwin
+	t.Setenv("LocalAppData", cache)   // windows
+	want := NewThrottler().dir
+	got := NewThrottler(WithThrottleDir(""))
+	if got.dir == "" || got.dir != want {
+		t.Fatalf("WithThrottleDir(\"\") 应保持缺省目录: got %q, want %q", got.dir, want)
+	}
+	// 缺省装配下节流真实生效：首调放行、窗口内二调拦截，全程无 fail-open 错误
+	// （带错误信号的是故障路径，缺省装配不该进它）。
+	allowed, err := got.Allow("zcode", "s-84", "task_complete")
+	if err != nil || !allowed {
+		t.Fatalf("缺省目录首调应放行且无错误: allowed=%v err=%v", allowed, err)
+	}
+	if allowed, err := got.Allow("zcode", "s-84", "task_complete"); allowed || err != nil {
+		t.Fatalf("缺省目录窗口内二调应拦截且无错误: allowed=%v err=%v", allowed, err)
+	}
+}
+
 // fail-open 纪律：状态文件损坏按过期处理；目录不可写仍放行并带出错误。
 func TestThrottlerFailOpen(t *testing.T) {
 	dir := t.TempDir()

@@ -36,9 +36,17 @@ func WithThrottleWindow(d time.Duration) ThrottlerOption {
 }
 
 // WithThrottleDir 状态目录（缺省用户缓存目录下 notifyx-hook，取不到时退
-// 回系统临时目录）。
+// 回系统临时目录）。dir 为空串时**保持缺省目录不变**（runtime#84）：空串
+// 不是有效目录，套上去只会让 MkdirAll 必败、Allow 每次走 fail-open 放行，
+// 节流整体静默失效。守卫放在库层而非调用点——CLI 的 flag 缺省值是空串、
+// 装配时无条件套本选项，库层守卫让「没配 = 用缺省」成为唯一语义，下一个
+// 调用点想再犯也犯不了。
 func WithThrottleDir(dir string) ThrottlerOption {
-	return func(t *Throttler) { t.dir = dir }
+	return func(t *Throttler) {
+		if dir != "" {
+			t.dir = dir
+		}
+	}
 }
 
 // NewThrottler 构造节流器（缺省窗口见 DefaultThrottleWindow）。
