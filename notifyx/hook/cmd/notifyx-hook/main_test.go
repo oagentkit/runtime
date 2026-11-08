@@ -109,6 +109,39 @@ func TestRunThrottleSkipsDuplicate(t *testing.T) {
 	}
 }
 
+// 缺省装配端到端（runtime#84）：不传 --throttle-dir 时缺省节流必须真实生效。
+// 此前 CLI 无条件套 WithThrottleDir(*throttleDir)（flag 缺省空串）把库层缺省
+// 目录覆盖成 ""，MkdirAll 必败 → 每次走 fail-open 放行：同键两次连发都被
+// 送达且 stderr 报「节流状态目录不可用」——「节流窗口内跳过」的退出码契约
+// 在缺省配置下不可达。全部既有用例都显式传了 --throttle-dir，此路径零覆盖。
+// 用户缓存目录环境变量指进临时目录隔离，绝不触碰真实用户缓存。
+func TestRunDefaultThrottleDirSkipsDuplicate(t *testing.T) {
+	cache := t.TempDir()
+	t.Setenv("XDG_CACHE_HOME", cache) // linux
+	t.Setenv("HOME", cache)           // darwin
+	t.Setenv("LocalAppData", cache)   // windows
+	srv, rec := sinkServer(t)
+	args := []string{"--agent", "zcode", "--url", srv.URL} // 无 --throttle-dir：走缺省目录
+	stdin := strings.NewReader(`{"event":"Stop","session_id":"s-84"}`)
+	var stderr strings.Builder
+	if code := run(args, stdin, new(strings.Builder), &stderr); code != exitOK {
+		t.Fatalf("首次 exit=%d（stderr: %s）", code, stderr.String())
+	}
+	if code := run(args, strings.NewReader(`{"event":"Stop","session_id":"s-84"}`), new(strings.Builder), &stderr); code != exitOK {
+		t.Fatalf("节流命中应按正常退出（重复不是错误）, exit=%d", code)
+	}
+	if got, _ := rec.snapshot(); len(got) != 1 {
+		t.Fatalf("缺省节流下应只送达 1 条, got %d", len(got))
+	}
+	// stderr 应是设计内的「跳过」信号，而不是 fail-open 的「目录不可用」。
+	if !strings.Contains(stderr.String(), "节流窗口") {
+		t.Fatalf("第二次应输出节流跳过信号: %q", stderr.String())
+	}
+	if strings.Contains(stderr.String(), "目录不可用") {
+		t.Fatalf("缺省装配不应有 fail-open 错误信号: %q", stderr.String())
+	}
+}
+
 // codex argv 形态：--arg 从首个位置参数取 payload（JSON 追加在命令尾部）。
 func TestRunArgPayload(t *testing.T) {
 	srv, rec := sinkServer(t)

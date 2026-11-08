@@ -60,6 +60,14 @@ MIT
 `procx` 被 tier1 的 `mcpkit`、`promptx` 使用，**必须留在 tier0**。
 把它并入 tier2 的 `tools` 会造成 tier1→tier2 分层倒挂，违反矩阵不变量。
 
+`procx` 同时是 **agent 无关的通用进程治理**原语（子进程最小环境 / 进程树终止 /
+等待结果分类），非 agent 下游可以放心为 `ChildEnv` 引入本 module：其包级
+import 面由测试机械钉死（`go test ./procx` 即门禁，runtime#83）——只准
+标准库 + `oekit/concurrency/async`，**不 import 本仓其他包**，下游二进制
+不会拖入 hotplug/notifyx 等其余包的代码。`ChildEnv` 是**默认拒绝**语义
+（allowlist 白名单，不是 denylist 黑名单——denylist 永远漏新凭据），
+白名单之外的环境变量一律不透传，显式放行走 `extra` 参数。
+
 ### `breaker` 已退役
 
 原三态熔断器已迁到 `oekit/concurrency/breaker`，由 `llm` 仓的准入适配层消费。

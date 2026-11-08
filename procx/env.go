@@ -29,9 +29,14 @@ var baseEnvAllow = map[string]bool{
 // ChildEnv 构造子进程最小环境（导出：mcp 等自行 spawn 外部子进程的包共用同一
 // 纪律；经 procx.Run 执行时无需调用——Run 内部已应用）：
 // 白名单 + 显式透传项 + 禁交互。
-// extra 两种形态：纯名（如 "HF_TOKEN"）从当前进程按名透传（不存在则丢弃）；
-// 含 "="（如 "HF_TOKEN=xxx"）按 KEY=VALUE 字面注入，且同名父进程值不透传
-// （每 key 唯一，避免 environ 同名两项时子进程取值依实现而异）。
+//
+// 语义是**默认拒绝**（runtime#83）：环境集 = baseEnvAllow 白名单 ∪ extra
+// 显式放行，白名单之外的一切变量——包括未来新出现的敏感变量——一律不进
+// 子进程环境。刻意用 allowlist 而非 denylist：denylist 只能列已知凭据名，
+// 新凭据永远漏；allowlist 的漏只表现为「少了一个无害变量」，错了也错在
+// 安全侧。extra 两种形态：纯名（如 "HF_TOKEN"）从当前进程按名透传（不存在
+// 则丢弃）；含 "="（如 "HF_TOKEN=xxx"）按 KEY=VALUE 字面注入，且同名父进程
+// 值不透传（每 key 唯一，避免 environ 同名两项时子进程取值依实现而异）。
 // 尾部固定追加 GIT_TERMINAL_PROMPT=0（git 弹终端提问会挂到超时）与 CI=1——
 // 对非 git 子进程无害。
 func ChildEnv(extra []string) []string {
