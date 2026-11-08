@@ -1,6 +1,11 @@
 package procx
 
-import "bytes"
+import (
+	"bytes"
+	"sync/atomic"
+
+	"github.com/oekit/concurrency/async"
+)
 
 // maxLineLen lineWriter 单行缓冲上限：超限丢弃该行不再回调。partial 若无上限，
 // 单行无换行洪泛会绕过 maxChildStdout 限容（claude stream-json 每个事件就是一行，
@@ -61,4 +66,33 @@ func (w *lineWriter) Write(p []byte) (int, error) {
 		}
 	}
 	return n, nil
+}
+
+// guardOnLine 收编 OnLine 回调的外部 panic（runtime#70）。
+//
+// 为什么必须库层收编：回调运行在 os/exec **自己的内部拷贝 goroutine** 上
+// （writerDescriptor 的裸 io.Copy，无 recover），回调 panic 顺 Write → io.Copy
+// 逐层上抛、被 exec 以进程级 fatal error 处理——调用方在自己 goroutine 上
+// defer recover 拦不住另一条 goroutine，爆炸半径是整个宿主进程，与全仓
+// 「外部回调异常只降级、不上炸」的不变量（worker 池隔离 claim/run/heartbeat、
+// LeaderElector.runCallback、notifyx 经 async.GoSafe 投递）矛盾。
+//
+// 收编手法与矩阵标准的 async.Runner/RunSafe 家族同源：RunSafeErr 同步 recover
+// + 经 PanicHandler 汇报（零值 Runner 回退全局 handler，宿主可 SetPanicHandler
+// 接管观测；本仓不引入日志依赖）。首个 panic 后**本次执行**不再回调——缺陷已
+// 暴露，继续回调只会重复炸同一处；下次 Run 另起新守卫。stdout 全文仍照常采集
+// 兜底：外部回调缺陷降级为「丢这一次的行回调」，而不是丢整个进程。
+func guardOnLine(onLine func(string)) func(string) {
+	var broken atomic.Bool
+	return func(line string) {
+		if broken.Load() {
+			return
+		}
+		if err := (async.Runner{}).RunSafeErr(func() error {
+			onLine(line)
+			return nil
+		}); err != nil {
+			broken.Store(true)
+		}
+	}
 }
