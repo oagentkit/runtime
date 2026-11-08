@@ -8,6 +8,11 @@
 
 Merge branch 'main' into fix/audit-issues-70-69-63
 
+- 杂务(deps)：依赖地板追到最新——github.com/oekit/pkg v0.38.0
+
+pkg v0.38.0（minor 新增，无 API 变更）落地，发版时刻地板时效门禁要求追平。
+兼容性实测：go build / go vet / go test -race -count=1 ./... 全绿，go mod tidy -diff 无漂移。
+
 - 杂务(deps)：依赖地板追到最新——pkg v0.37.6 / concurrency v0.29.0 / logx v0.8.11（按本仓依赖取齐）
 
 发版时刻地板时效门禁要求追平。concurrency v0.29.0 为纯新增（四原语 feat），无 API 变更。
