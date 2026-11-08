@@ -16,8 +16,6 @@ package procx
 
 import (
 	"os/exec"
-	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 )
@@ -29,9 +27,9 @@ const depsFloor = "github.com/oekit/concurrency"
 // TestProcxDepsFloor 断言 procx 的全量依赖闭包不越地板：
 // 本仓包只准 procx 自身，外部包只准 oekit/concurrency，其余必须是标准库。
 func TestProcxDepsFloor(t *testing.T) {
-	goTool, err := goToolPath()
+	goTool, err := exec.LookPath("go")
 	if err != nil {
-		t.Skipf("go 工具链不可用，无法断言依赖闭包（CI/本地开发必有工具链）: %v", err)
+		t.Skipf("go 工具链不在 PATH，无法断言依赖闭包（CI/本地开发必有工具链）: %v", err)
 	}
 	// 测试进程的工作目录 = 本包源码目录（go test 语义），「.」即 procx；
 	// -deps 列传递闭包，比逐文件解析 import 更硬——间接拖进来的重依赖也逃不掉。
@@ -56,21 +54,4 @@ func TestProcxDepsFloor(t *testing.T) {
 			t.Errorf("procx 外部依赖超出地板（只允许 %s，runtime#83）: %s", depsFloor, line)
 		}
 	}
-}
-
-// goToolPath 定位 go 命令：优先 PATH，退回 GOROOT/bin（交叉编译/裁剪环境里
-// go 不在 PATH 但 GOROOT 可用）。
-func goToolPath() (string, error) {
-	if p, err := exec.LookPath("go"); err == nil {
-		return p, nil
-	}
-	name := "go"
-	if runtime.GOOS == "windows" {
-		name += ".exe"
-	}
-	p := filepath.Join(runtime.GOROOT(), "bin", name)
-	if _, err := exec.LookPath(p); err != nil {
-		return "", err
-	}
-	return p, nil
 }
