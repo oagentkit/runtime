@@ -14,6 +14,9 @@
 //
 // 失败语义：hook 进程失败（超时/非零退出/stdout 非 JSON/事件名不符）默认按
 // 「无意见」处理不炸主流程，经 OnError 可观测——扩展点故障不该阻断业务。
+// 例外是**决策已出口**的失败（runtime#69）：hook 打印契约内的决策 JSON 之后
+// 才失败（非零退出/超时），决策从 stdout 尾流照常救回并采纳，执行失败仍经
+// OnError 上报——进程失败不能抹掉它已经说过的话。
 //
 // 「需要强一致的场景由调用方在 OnError 里自行收紧」曾是一句做不到的承诺：
 // OnError 是纯观察者，Run 里失败即 continue，调用方没有任何办法把失败升级成
@@ -175,6 +178,20 @@ func (r *Runner) Run(ctx context.Context, event Event, payload Input) RunResult 
 		}
 		out, err := runHook(ctx, h, payload)
 		if err != nil {
+			if out != nil {
+				// 执行失败但决策已救回（runtime#69）：决策照常参与归并（在
+				// FailClosedEvents 列出的事件上也取代保守判定——hook 明确说过的话
+				// 优先于失败缺省），执行失败本身仍经 OnError 上报，两条信息不互相顶掉。
+				res, perr := processOutput(event, out)
+				merged.merge(res)
+				if r.OnError != nil {
+					r.OnError(h, err)
+					if perr != nil {
+						r.OnError(h, perr)
+					}
+				}
+				continue
+			}
 			if r.OnError != nil {
 				r.OnError(h, err)
 			}
@@ -236,17 +253,27 @@ func runHook(ctx context.Context, h Hook, payload Input) (*Output, error) {
 	if err != nil {
 		return nil, err
 	}
-	stdout, _, _, err := procx.Run(ctx, procx.RunRequest{
+	stdout, _, _, perr := procx.Run(ctx, procx.RunRequest{
 		Argv:      h.Command,
 		Env:       h.Env,
 		Timeout:   timeout,
 		MaxStdout: maxStdout,
 		Stdin:     payloadJSON,
 	})
-	if err != nil {
-		return nil, fmt.Errorf("hookx: %w", err)
-	}
 	raw := strings.TrimSpace(stdout)
+	if perr != nil {
+		// 执行失败 ≠ 决策未说（runtime#69）：hook 打印决策 JSON **之后**才非零
+		// 退出（决策后内部出错 / `set -e` 后置检查 / 包装器附诊断）是真实世界的
+		// hook 形态，procx 失败路径也返回 stdout 尾流正是为了让「result 优先」的
+		// 消费方救回结论。这里若整段丢弃 stdout，打出来的 block 会静默蒸发，缺省
+		// fail-open 把动作放过去——「hook 想拦、库当没看见」深一层的复刻。
+		// 抢救标准与成功路径逐条同口径（见 salvageOutput）；救回的决策与执行
+		// 失败一并返回，两条信息都不丢。
+		if out := salvageOutput(raw, payload.Event); out != nil {
+			return out, fmt.Errorf("hookx: %w（hook 已输出决策 JSON，决策照常采纳）", perr)
+		}
+		return nil, fmt.Errorf("hookx: %w", perr)
+	}
 	if raw == "" {
 		return nil, nil // 无输出=无意见
 	}
@@ -259,6 +286,37 @@ func runHook(ctx context.Context, h Hook, payload Input) (*Output, error) {
 			out.HookSpecificOutput.HookEventName, payload.Event)
 	}
 	return &out, nil
+}
+
+// salvageOutput 从失败执行的 stdout 尾流里抢救决策（runtime#69）。
+//
+// 采纳标准与成功路径逐条同口径，不因「进程失败了」而放宽：
+//   - stdout 可解析为 Output（坏 JSON 不猜）；
+//   - 携带**契约内的**决策信号：decision ∈ approve/block（大小写不敏感）或
+//     continue:false。契约外的取值不猜语义（hookx#29）——救不回就维持原
+//     失败语义（FailClosedEvents 该兜底的照旧兜底）；continue:true / 无决策
+//     =「无意见」，没有抢救价值；
+//   - hookSpecificOutput 带事件名时必须与本事件相符（成功路径同一道门）。
+//
+// 返回 nil = 没有可抢救的决策，调用方维持纯失败语义。
+func salvageOutput(raw string, event Event) *Output {
+	if raw == "" {
+		return nil
+	}
+	var out Output
+	if err := json.Unmarshal([]byte(raw), &out); err != nil {
+		return nil
+	}
+	decision := strings.ToLower(strings.TrimSpace(out.Decision))
+	hasDecision := decision == "approve" || decision == "block"
+	hasBlockSignal := out.Continue != nil && !*out.Continue
+	if !hasDecision && !hasBlockSignal {
+		return nil
+	}
+	if out.HookSpecificOutput != nil && out.HookSpecificOutput.HookEventName != event {
+		return nil
+	}
+	return &out
 }
 
 // processOutput 单 hook 输出 → 结果（对标 processHookOutput）。

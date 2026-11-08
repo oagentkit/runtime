@@ -83,10 +83,12 @@ func execCLI(ctx context.Context, dir string, argv []string, env []string,
 
 	outBuf, errBuf := newCappedBuffer(maxStdout), newCappedBuffer(0)
 	var lineW *lineWriter
+	var lineCb func(string)
 	if onLine == nil {
 		cmd.Stdout = outBuf
 	} else {
-		lineW = &lineWriter{buf: outBuf, onLine: onLine}
+		lineCb = guardOnLine(onLine) // 回调 panic 库层收编（runtime#70）
+		lineW = &lineWriter{buf: outBuf, onLine: lineCb}
 		cmd.Stdout = lineW
 	}
 	cmd.Stderr = errBuf
@@ -97,9 +99,11 @@ func execCLI(ctx context.Context, dir string, argv []string, env []string,
 	}
 	// 行缓冲收尾（放在错误判断之前）：失败路径的流尾事件同样要 flush——
 	// mimo 的 error JSON / kimi 的最后一行可能无尾换行，claude 的 result
-	// 事件到达后进程仍可能非零退出，"result 优先"策略依赖这里救回结果
-	if onLine != nil && len(lineW.partial) > 0 && !lineW.overflow {
-		onLine(string(lineW.partial))
+	// 事件到达后进程仍可能非零退出，"result 优先"策略依赖这里救回结果。
+	// flush 也走同一个 panic 守卫（runtime#70）——它在调用方 goroutine 上，
+	// 但纪律只有一份：外部回调缺陷一律收编，不靠调用方自觉 recover。
+	if lineCb != nil && len(lineW.partial) > 0 && !lineW.overflow {
+		lineCb(string(lineW.partial))
 		lineW.partial = nil
 	}
 
@@ -199,13 +203,34 @@ func classifyWait(ctx, cctx context.Context, name string, waitErr error, errBuf 
 		tail = tail[len(tail)-400:]
 	}
 	switch {
+	// 本地 Timeout 先判（runtime#63）：调用方恰在本地超时落定之后才 cancel
+	// 时，ctx.Err() 与本地 deadline 同时非 nil，真实超时必须报 ErrTimeout——
+	// 旧判据 ctx.Err() 优先把这条边界整条吞成 ErrCanceled，调用方按
+	// ErrTimeout 重试 / 按 ErrCanceled 放弃的分派走错分支。
+	// 两个 ctx 同为 DeadlineExceeded 时谁是肇事发判据见 localDeadlineFired。
+	case errors.Is(cctx.Err(), context.DeadlineExceeded) && localDeadlineFired(ctx, cctx):
+		return fmt.Errorf("procx: %s %w（%s）", name, ErrTimeout, timeout)
 	case ctx.Err() != nil: // 调用方主动取消（含调用方自己的 deadline）
 		return fmt.Errorf("procx: %s %w: %w", name, ErrCanceled, ctx.Err())
-	case errors.Is(cctx.Err(), context.DeadlineExceeded): // 本地 Timeout
-		return fmt.Errorf("procx: %s %w（%s）", name, ErrTimeout, timeout)
 	default:
 		return fmt.Errorf("procx: %s 执行失败: %w: %s", name, waitErr, strings.TrimSpace(tail))
 	}
+}
+
+// localDeadlineFired 报告 cctx 的 DeadlineExceeded 是否出自**本地 Timeout**
+// （本地预算耗尽）而非调用方自己的 deadline 经 parent 传播（runtime#63）。
+//
+// 两者在 cctx.Err() 上同形（都是 DeadlineExceeded），但语义相反：调用方的
+// deadline 更早时，WithDeadline 退化为对 parent 的 cancel 拷贝（cctx.Deadline()
+// 与 parent 相等），那是一次被调用方中止的执行，归 ErrCanceled（沿用既有
+// 语义）；本地 deadline 是两者中较早、真正到点的那一个时才是 ErrTimeout。
+// 判据：parent 无 deadline，或 parent deadline 晚于 cctx deadline（本地的
+// 先到点）。两者相等（调用方刻意传入同一时刻）时取保守侧——按调用方自己的
+// deadline 计，归 ErrCanceled。
+func localDeadlineFired(ctx, cctx context.Context) bool {
+	parentDeadline, ok := ctx.Deadline()
+	cctxDeadline, _ := cctx.Deadline()
+	return !ok || parentDeadline.After(cctxDeadline)
 }
 
 // noteTruncated 超限截断时在 stdout 尾部留痕（调用方可见「有内容被丢」）。
@@ -233,7 +258,9 @@ type RunRequest struct {
 	// Timeout 单次执行超时（0 = 10 分钟缺省）。
 	Timeout time.Duration
 	// OnLine 可选 stdout 按行回调（nil = 只缓冲；回调在读取 goroutine 中执行，
-	// 不得阻塞/panic；单行超 maxLineLen 会被丢弃）。
+	// 不得阻塞；单行超 maxLineLen 会被丢弃）。回调 panic 由库层收编（runtime#70）：
+	// 本次执行后续行不再回调、stdout 全文仍采集兜底，宿主进程不受影响——
+	// 「不得 panic」不再是宿主进程的生死线，但仍是纪律（panic 后行回调丢失）。
 	OnLine func(string)
 	// MaxStdout stdout 采集上限（0 = 8MB 缺省）。
 	MaxStdout int
