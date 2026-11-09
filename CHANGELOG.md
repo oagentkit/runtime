@@ -2,6 +2,40 @@
 
 > 本文件由 `matrix-tools/scripts/gen_changelogs.py` 从 git 历史生成，按 tag 切段、取每段内的 conventional commit 渲染。
 
+## [v0.12.6] — 2026-11-10
+
+### 新增(procx)：RunDetailed/RunResult 结构化截断出口，截断事实不再靠尾缀文案（#92）
+
+cappedBuffer 截断此前唯一出口是 stdout/stderr 尾部追加的 noteTruncated 人读
+文案——tools#94 的 fail-closed 终态守门只能 strings.Contains("（stdout 超过")
++ HasSuffix("已截断）") 双条件尾缀匹配：文案一改即静默失效；CLI 自身输出恰
+以此短语收尾则误判（拿文案当协议）。
+- 新增 RunResult{Stdout, Stderr, ExitCode, StdoutTruncated, StderrTruncated}
+  与 RunDetailed(ctx, req) (RunResult, error)：截断事实从 cappedBuffer.truncated
+  直接透出，所有返回路径（成功/失败/超时/取消/OnLine）结构化可用（runtime#38
+  「任何路径都留痕」的结构化版本）
+- RunResult.Truncated() 汇总方法：只关心「有没有内容被丢」的 fail-closed
+  守门一处判定
+- Run 签名冻结不变，改为 RunDetailed 的解构薄壳（tier0 基座，存量消费方
+  hookx/acpx 不动）；execCLI 为仓内私有，随改返回 RunResult
+- noteTruncated 人读尾巴保留（排障面不回退），降级为非机器契约
+
+- 杂务(deps)：依赖地板追到最新——github.com/oekit/concurrency v0.31.1
+
+| 依赖 | 现地板 | 抬到 |
+|---|---|---|
+| `github.com/oekit/concurrency` | `v0.31.0` | `v0.31.1` |
+| `github.com/oekit/pkg` | `v0.40.0` | `v0.41.0` |
+## 为什么
+矩阵的**发版时刻地板时效**门禁（`verify_tag_floor --ref HEAD`）要求：各仓 HEAD
+（= 下次发版会发出去的内容）的依赖地板，相对那一刻的依赖最新版本，不能已落后。
+oekit 基座与矩阵模块都在高频发版 ⇒ 地板是**跑步机**，落后一格就会判红。
+## 兼容性实测
+本工具在提交前跑完 `go build` / `go vet` / `go test -race -count=1 ./...`（全绿才提交）
+与 `go mod tidy -diff`（无漂移）⇒ 改动**只影响依赖版本**，零行为差异。
+只改 `go.mod` / `go.sum` ⇒ 不需要 CHANGELOG 条目（版本段由下次发版的 `prewrite` 生成）。
+
+
 ## [v0.12.5] — 2026-11-09
 
 ### 修复：runtime 第三轮 issue 清零（#83 #84）
