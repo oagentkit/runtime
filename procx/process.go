@@ -66,15 +66,15 @@ func (c *cappedBuffer) Write(p []byte) (int, error) {
 // 分工：newGroupCmd 建组与杀组纪律 / startAndWait 启动写 stdin 并收割 /
 // classifyWait 错误语义 / noteTruncated 截断留痕。
 func execCLI(ctx context.Context, dir string, argv []string, env []string,
-	timeout time.Duration, onLine func(string), maxStdout int, stdin []byte) (stdout, stderr string, exitCode int, err error) {
+	timeout time.Duration, onLine func(string), maxStdout int, stdin []byte) (RunResult, error) {
 
 	if len(argv) == 0 {
-		return "", "", -1, fmt.Errorf("procx: 命令为空")
+		return RunResult{ExitCode: -1}, fmt.Errorf("procx: 命令为空")
 	}
 	// argv[0] 只允许是可执行名：以 "-" 开头会被 exec 层之下的参数解析当选项
 	// （argument injection）；来自装配配置的越界即配置错误，fail-fast
 	if strings.HasPrefix(argv[0], "-") {
-		return "", "", -1, fmt.Errorf("procx: 非法可执行名 %q", argv[0])
+		return RunResult{ExitCode: -1}, fmt.Errorf("procx: 非法可执行名 %q", argv[0])
 	}
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -95,7 +95,7 @@ func execCLI(ctx context.Context, dir string, argv []string, env []string,
 
 	waitErr, err := startAndWait(cmd, stdin, group, argv[0])
 	if err != nil {
-		return "", "", -1, err
+		return RunResult{ExitCode: -1}, err
 	}
 	// 行缓冲收尾（放在错误判断之前）：失败路径的流尾事件同样要 flush——
 	// mimo 的 error JSON / kimi 的最后一行可能无尾换行，claude 的 result
@@ -115,8 +115,14 @@ func execCLI(ctx context.Context, dir string, argv []string, env []string,
 	//
 	// stderr 同病同治：它的上限是 maxChildStdout（8MB），此前两条路径都不标记。
 	// 与 stdout 的唯一区别是它的缺省上限取自函数内的缺省值（传 0）。
-	out, errStr := noteTruncated(outBuf.buf.String(), outBuf, maxStdout),
-		noteTruncated(errBuf.buf.String(), errBuf, 0)
+	// 截断**事实**同步透出（procx#92）：cappedBuffer.truncated 是唯一事实源，
+	// 尾部人读留痕与结构化布尔同源于它——文案只是排障面，不再是机器契约。
+	res := RunResult{
+		Stdout:          noteTruncated(outBuf.buf.String(), outBuf, maxStdout),
+		Stderr:          noteTruncated(errBuf.buf.String(), errBuf, 0),
+		StdoutTruncated: outBuf.truncated,
+		StderrTruncated: errBuf.truncated,
+	}
 	if waitErr != nil {
 		// ErrWaitDelay：leader 已成功退出，但遗留的后台孙进程仍握 stdout 写端，
 		// WaitDelay 到点强关管道所致（os/exec 语义：Cancel 未被调用 + 退出成功时
@@ -124,12 +130,14 @@ func execCLI(ctx context.Context, dir string, argv []string, env []string,
 		// 不是失败（npm 类包装器守护化后台进程曾把成功跑整体误判为失败；
 		// 第六轮审计）。成功特判的**完整条件**见 waitDelayIsBenign。
 		if waitDelayIsBenign(ctx, cctx, waitErr) {
-			return out, errStr, 0, nil
+			res.ExitCode = 0
+			return res, nil
 		}
-		return out, errStr, exitStatus(waitErr),
-			classifyWait(ctx, cctx, argv[0], waitErr, errBuf, timeout)
+		res.ExitCode = exitStatus(waitErr)
+		return res, classifyWait(ctx, cctx, argv[0], waitErr, errBuf, timeout)
 	}
-	return out, errStr, 0, nil
+	res.ExitCode = 0
+	return res, nil
 }
 
 // waitDelayIsBenign 报告 ErrWaitDelay 是否属于「成功执行 + 孙进程握管道」的
@@ -272,16 +280,51 @@ type RunRequest struct {
 // defaultTimeout 单次执行缺省超时。
 const defaultTimeout = 10 * time.Minute
 
-// Run 以进程组纪律执行外部命令：Setpgid 建组 → 超时/取消 TERM 整组 →
-// killGrace 宽限后 SIGKILL。超时/取消可经 errors.Is(err, ErrTimeout/ErrCanceled)
-// 程序化区分；非零退出返回 error（含 stderr 尾巴），exitCode 一并返回。
-// 环境走白名单——待执行目录里的命令可执行任意代码，全量环境等于泄漏宿主凭证。
-func Run(ctx context.Context, req RunRequest) (stdout, stderr string, exitCode int, err error) {
+// RunResult 结构化执行结果（procx#92）：Run 旧签名不变，需要截断事实等结构化
+// 出口的消费方改走 RunDetailed。截断事实与 stdout/stderr 尾部的 noteTruncated
+// 人读留痕同源于 cappedBuffer.truncated——文案保留作排障面，但**不再是机器
+// 契约**：fail-closed 守门（tools#94 形态）一律判定布尔字段，不尾缀匹配文案
+// （文案改动即静默失效；CLI 输出恰以该短语收尾即误判）。
+type RunResult struct {
+	// Stdout / Stderr 采集全文（超限被裁剪 + 尾部人读截断留痕）。
+	Stdout string
+	Stderr string
+	// ExitCode 退出码（启动/托管期失败为 -1）。
+	ExitCode int
+	// StdoutTruncated / StderrTruncated 截断事实：本次执行对应流超过采集上限、
+	// 有内容被丢弃（即使在错误返回路径上也是结构化透出的，对齐 runtime#38
+	// 「任何路径都留痕」的结构化版本）。
+	StdoutTruncated bool
+	StderrTruncated bool
+}
+
+// Truncated 汇总截断事实：stdout 或 stderr 任一发生截断即 true。只关心
+// 「有没有内容被丢」的 fail-closed 守门用这个，不必逐流判。
+func (r RunResult) Truncated() bool {
+	return r.StdoutTruncated || r.StderrTruncated
+}
+
+// RunDetailed 以进程组纪律执行外部命令，返回结构化 RunResult（含截断事实，
+// procx#92）。执行纪律与 Run 完全同源（同一 execCLI）；错误语义一致——
+// 超时/取消可经 errors.Is(err, ErrTimeout/ErrCanceled) 程序化区分，非零退出
+// 返回 error（含 stderr 尾巴）且 ExitCode 一并携带。
+func RunDetailed(ctx context.Context, req RunRequest) (RunResult, error) {
 	timeout := req.Timeout
 	if timeout <= 0 {
 		timeout = defaultTimeout
 	}
 	return execCLI(ctx, req.Dir, req.Argv, ChildEnv(req.Env), timeout, req.OnLine, req.MaxStdout, req.Stdin)
+}
+
+// Run 以进程组纪律执行外部命令：Setpgid 建组 → 超时/取消 TERM 整组 →
+// killGrace 宽限后 SIGKILL。超时/取消可经 errors.Is(err, ErrTimeout/ErrCanceled)
+// 程序化区分；非零退出返回 error（含 stderr 尾巴），exitCode 一并返回。
+// 环境走白名单——待执行目录里的命令可执行任意代码，全量环境等于泄漏宿主凭证。
+// 需要截断事实等结构化出口时改走 RunDetailed（procx#92）；本函数是它的解构
+// 薄壳，签名冻结（tier0 基座，存量消费方不动）。
+func Run(ctx context.Context, req RunRequest) (stdout, stderr string, exitCode int, err error) {
+	res, err := RunDetailed(ctx, req)
+	return res.Stdout, res.Stderr, res.ExitCode, err
 }
 
 // exitStatus 从 Wait 错误提取退出码。
