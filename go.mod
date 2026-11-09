@@ -2,6 +2,6 @@ module github.com/oagentkit/runtime
 
 go 1.24.0
 
-require github.com/oekit/concurrency v0.30.1
+require github.com/oekit/concurrency v0.31.0
 
 require github.com/oekit/pkg v0.40.0
