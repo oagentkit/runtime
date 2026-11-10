@@ -2,6 +2,55 @@
 
 > 本文件由 `matrix-tools/scripts/gen_changelogs.py` 从 git 历史生成，按 tag 切段、取每段内的 conventional commit 渲染。
 
+## [v0.12.7] — 2026-11-11
+
+- 杂务(deps)：依赖地板追到最新——github.com/oekit/concurrency v0.33.0
+
+| 依赖 | 现地板 | 抬到 |
+|---|---|---|
+| `github.com/oekit/concurrency` | `v0.32.0` | `v0.33.0` |
+| `github.com/oekit/pkg` | `v0.42.0` | `v0.43.0` |
+## 为什么
+矩阵的**发版时刻地板时效**门禁（`verify_tag_floor --ref HEAD`）要求：各仓 HEAD
+（= 下次发版会发出去的内容）的依赖地板，相对那一刻的依赖最新版本，不能已落后。
+oekit 基座与矩阵模块都在高频发版 ⇒ 地板是**跑步机**，落后一格就会判红。
+## 兼容性实测
+本工具在提交前跑完 `go build` / `go vet` / `go test -race -count=1 ./...`（全绿才提交）
+与 `go mod tidy -diff`（无漂移）⇒ 改动**只影响依赖版本**，零行为差异。
+只改 `go.mod` / `go.sum` ⇒ 不需要 CHANGELOG 条目（版本段由下次发版的 `prewrite` 生成）。
+Co-authored-by: Murphy-Yi <zhangyi@Murphy-YideMac-Mini.local>
+
+- 杂务(deps)：依赖地板追到最新——github.com/oekit/concurrency v0.32.0
+
+| 依赖 | 现地板 | 抬到 |
+|---|---|---|
+| `github.com/oekit/concurrency` | `v0.31.2` | `v0.32.0` |
+| `github.com/oekit/pkg` | `v0.41.1` | `v0.42.0` |
+## 为什么
+矩阵的**发版时刻地板时效**门禁（`verify_tag_floor --ref HEAD`）要求：各仓 HEAD
+（= 下次发版会发出去的内容）的依赖地板，相对那一刻的依赖最新版本，不能已落后。
+oekit 基座与矩阵模块都在高频发版 ⇒ 地板是**跑步机**，落后一格就会判红。
+## 兼容性实测
+本工具在提交前跑完 `go build` / `go vet` / `go test -race -count=1 ./...`（全绿才提交）
+与 `go mod tidy -diff`（无漂移）⇒ 改动**只影响依赖版本**，零行为差异。
+只改 `go.mod` / `go.sum` ⇒ 不需要 CHANGELOG 条目（版本段由下次发版的 `prewrite` 生成）。
+Co-authored-by: Murphy-Yi <zhangyi@Murphy-YideMac-Mini.local>
+
+- 杂务(deps)：依赖地板追到最新——github.com/oekit/concurrency v0.31.2
+
+| 依赖 | 现地板 | 抬到 |
+|---|---|---|
+| `github.com/oekit/concurrency` | `v0.31.1` | `v0.31.2` |
+## 为什么
+矩阵的**发版时刻地板时效**门禁（`verify_tag_floor --ref HEAD`）要求：各仓 HEAD
+（= 下次发版会发出去的内容）的依赖地板，相对那一刻的依赖最新版本，不能已落后。
+oekit 基座与矩阵模块都在高频发版 ⇒ 地板是**跑步机**，落后一格就会判红。
+## 兼容性实测
+本工具在提交前跑完 `go build` / `go vet` / `go test -race -count=1 ./...`（全绿才提交）
+与 `go mod tidy -diff`（无漂移）⇒ 改动**只影响依赖版本**，零行为差异。
+只改 `go.mod` / `go.sum` ⇒ 不需要 CHANGELOG 条目（版本段由下次发版的 `prewrite` 生成）。
+
+
 ## [v0.12.6] — 2026-11-10
 
 ### 新增(procx)：RunDetailed/RunResult 结构化截断出口，截断事实不再靠尾缀文案（#92）
@@ -1008,19 +1057,6 @@ oekit v0.18.0 的两个发布都是**纯增量**，无破坏性变更：
 - tag 必须落在 CHANGELOG 提交之后（下游 go get 拿到的是 tag 快照）
 - 警告：无参重生成会吞掉待发版段，--next-version 是唯一能产出待发版段的开关
 - 本仓相关提醒（见正文）
-
-- 文档(changelog)：按新生成器规则重生成 CHANGELOG.md
-
-生成器修复（oagentkit/matrix-tools#43）落地：
-① `[round-N] ` 前缀被剥离 → conventional commit 解析不再失效，
-   **commit body 保留**（此前整段被丢弃，发布说明只剩标题）；
-② 非 conventional 提交也保留 body；
-③ `--check` 识别「待发版段」（预写了但还没打 tag 的那段）。
-本 PR 恢复的是**本就在 commit body 里**的正文（迁移步骤、代码块、
-判据锚点）——此前被 `[round-N] ` 前缀导致的解析失败丢弃了。
-**没有任何发布说明内容被删除**：删除的行都能在新增行里找到对应
-（规范化掉 `(#N)` 与 `[round-N] ` 前缀后逐行比对）。
-关联：oagentkit/matrix-tools#43、oagentkit/matrix-tools#40
 
 
 ## [v0.7.1] — 2026-10-20
