@@ -2,6 +2,10 @@
 
 > 本文件由 `matrix-tools/scripts/gen_changelogs.py` 从 git 历史生成，按 tag 切段、取每段内的 conventional commit 渲染。
 
+## [v0.12.9] — 2026-11-12
+
+- 杂务(modernize)：sort.* → slices.*/min-max 内建——吃 Go 1.21+ 标准库，零行为变化
+
 ## [v0.12.8] — 2026-11-11
 
 ### 修复(notifyx)：Close 超时排干后 EmitWait 收口——排干投 space + EmitWait 听 done（#99）
