@@ -13,6 +13,11 @@ Close 的 ctx 超时分支自排干队列（notifyx#37）时 deliverLoop 已退�
   enqueue 撞 errClosed 如实返回
 Co-authored-by: Murphy-Yi <zhangyi@Murphy-YideMac-Mini.local>
 
+- 杂务(deps)：依赖地板追到最新——github.com/oekit/pkg v0.44.0
+
+Co-authored-by: Murphy-Yi <zhangyi@Murphy-YideMac-Mini.local>
+
+
 ## [v0.12.7] — 2026-11-11
 
 - 杂务(deps)：依赖地板追到最新——github.com/oekit/concurrency v0.33.0
