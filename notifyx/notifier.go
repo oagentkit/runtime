@@ -162,8 +162,13 @@ func (n *Notifier) EmitWait(ctx context.Context, p Payload) error {
 		// 队列满：等 deliverLoop 取走一件（事件驱动，不轮询睡眠）。
 		// 等待期间**不持锁**——否则 Close 会卡在一个被慢 sink 堵住的
 		// EmitWait 后面，连带 Close 的 ctx 限期失效。
+		// n.done 兜底（runtime#99）：Close 的 ctx 超时分支**自排干**队列、
+		// deliverLoop 已退出（不再有 space 投递者）——只等 space 的 EmitWait
+		// 会永久阻塞。done 关闭即 Close 全路径完成，醒来重试 enqueue 撞
+		// errClosed 如实返回。
 		select {
 		case <-n.space:
+		case <-n.done:
 		case <-ctx.Done():
 			n.drop(p, ctx.Err())
 			return ctx.Err()
@@ -331,6 +336,13 @@ func (n *Notifier) Close(ctx context.Context) error {
 				break
 			}
 			n.drop(p, errAborted)
+			// 让出容量信号（runtime#99）：与 deliverLoop 同纪律——等 space
+			// 的 EmitWait 醒来重试。done 兜底（EmitWait 侧）保证最终全部
+			// 收口，这里投信号让最先等的那个立即走。
+			select {
+			case n.space <- struct{}{}:
+			default:
+			}
 		}
 		return ctx.Err()
 	}
