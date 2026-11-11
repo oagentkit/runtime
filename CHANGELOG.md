@@ -2,6 +2,17 @@
 
 > 本文件由 `matrix-tools/scripts/gen_changelogs.py` 从 git 历史生成，按 tag 切段、取每段内的 conventional commit 渲染。
 
+## [v0.12.8] — 2026-11-11
+
+### 修复(notifyx)：Close 超时排干后 EmitWait 收口——排干投 space + EmitWait 听 done（#99）
+
+Close 的 ctx 超时分支自排干队列（notifyx#37）时 deliverLoop 已退出、space 无
+投递者——只等 space 的 EmitWait 永久阻塞（#37 修复的残留面）。双收口：
+- 排干循环每取走一件投一次 space（与 deliverLoop 同纪律），最先等的立即醒
+- EmitWait 的等待面加 n.done 兜底：Close 全路径完成（done 关闭）即醒来重试
+  enqueue 撞 errClosed 如实返回
+Co-authored-by: Murphy-Yi <zhangyi@Murphy-YideMac-Mini.local>
+
 ## [v0.12.7] — 2026-11-11
 
 - 杂务(deps)：依赖地板追到最新——github.com/oekit/concurrency v0.33.0
