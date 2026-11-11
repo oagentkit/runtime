@@ -4,7 +4,7 @@
 package hotplug
 
 import (
-	"sort"
+	"slices"
 	"sync/atomic"
 )
 
@@ -57,7 +57,7 @@ func (p *Plugboard) Disabled() []string {
 			}
 		}
 	}
-	sort.Strings(out)
+	slices.Sort(out)
 	return out
 }
 
