@@ -23,7 +23,7 @@ go get github.com/oagentkit/runtime
 
 ## 外部依赖地板
 
-- **零第三方依赖。** 只依赖第一方基座 `github.com/oekit/concurrency`。
+- **零第三方依赖。** 只依赖第一方基座 `github.com/oekit/concurrency` 与 `github.com/oekit/pkg`（pkg 自 concurrency v0.34.0 经 async 的 panic 收编进入闭包，#211）。
 
 ## 与 oekit 的关系
 
@@ -63,7 +63,7 @@ MIT
 `procx` 同时是 **agent 无关的通用进程治理**原语（子进程最小环境 / 进程树终止 /
 等待结果分类），非 agent 下游可以放心为 `ChildEnv` 引入本 module：其包级
 import 面由测试机械钉死（`go test ./procx` 即门禁，runtime#83）——只准
-标准库 + `oekit/concurrency/async`，**不 import 本仓其他包**，下游二进制
+标准库 + `oekit/concurrency/async`（含其传递闭包 `oekit/pkg/errors`），**不 import 本仓其他包**，下游二进制
 不会拖入 hotplug/notifyx 等其余包的代码。`ChildEnv` 是**默认拒绝**语义
 （allowlist 白名单，不是 denylist 黑名单——denylist 永远漏新凭据），
 白名单之外的环境变量一律不透传，显式放行走 `extra` 参数。
