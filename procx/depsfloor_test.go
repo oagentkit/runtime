@@ -22,10 +22,13 @@ import (
 
 // depsFloor 本包允许的外部依赖前缀（第一方基座；标准库不在此列——
 // 其导入路径首段不含「.」）。
-const depsFloor = "github.com/oekit/concurrency"
+// oekit/pkg 自 concurrency v0.34.0 起进入闭包（async 的 panic 收编消费
+// pkg/errors，runtime#211 地板抬升实录）——同属 oekit 第一方基座，随合同放行。
+var depsFloor = []string{"github.com/oekit/concurrency", "github.com/oekit/pkg"}
 
 // TestProcxDepsFloor 断言 procx 的全量依赖闭包不越地板：
-// 本仓包只准 procx 自身，外部包只准 oekit/concurrency，其余必须是标准库。
+// 本仓包只准 procx 自身，外部包只准 depsFloor 白名单（oekit/concurrency
+// 与 oekit/pkg 两基座），其余必须是标准库。
 func TestProcxDepsFloor(t *testing.T) {
 	goTool, err := exec.LookPath("go")
 	if err != nil {
@@ -50,8 +53,18 @@ func TestProcxDepsFloor(t *testing.T) {
 			continue
 		}
 		// 外部包：白名单只有第一方基座；标准库路径首段无「.」自然放行。
-		if first := strings.SplitN(line, "/", 2)[0]; strings.Contains(first, ".") && !strings.HasPrefix(line, depsFloor) {
-			t.Errorf("procx 外部依赖超出地板（只允许 %s，runtime#83）: %s", depsFloor, line)
+		if first := strings.SplitN(line, "/", 2)[0]; strings.Contains(first, ".") && !allowedDepsFloor(line) {
+			t.Errorf("procx 外部依赖超出地板（只允许 %v，runtime#83）: %s", depsFloor, line)
 		}
 	}
+}
+
+// allowedDepsFloor 逐前缀判定（slices.ContainsForm 面太小，显式循环最直白）。
+func allowedDepsFloor(line string) bool {
+	for _, p := range depsFloor {
+		if strings.HasPrefix(line, p) {
+			return true
+		}
+	}
+	return false
 }
