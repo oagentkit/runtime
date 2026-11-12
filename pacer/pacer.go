@@ -44,9 +44,17 @@ type Stream struct {
 // 多包 co-import 时与其它包的 Option/WithClock 冲突；仓内其余三包均为 XxxOption）。
 type StreamOption func(*Stream)
 
-// WithClock 注入时钟（测试用；缺省 time.Now）。
+// WithClock 注入时钟（测试用；缺省 time.Now）。nil 按「nil 参数=显式回退默认值」
+// 口径处理（对齐 oekit/pkg cache.WithClock 的 pkg#356 修法）：不把 nil 存进实例
+// ——nil 一路存到 Offer/Flush 的 s.now() 调用点，就成了构造期之外的远端
+// SIGSEGV（runtime#113）。
 func WithClock(now func() time.Time) StreamOption {
-	return func(s *Stream) { s.now = now }
+	return func(s *Stream) {
+		if now == nil {
+			return
+		}
+		s.now = now
+	}
 }
 
 // NewStream 构造；interval<=0 / bytes<=0 / capBytes<=0 取对应缺省值。
@@ -68,6 +76,9 @@ func NewStream(interval time.Duration, bytes, capBytes int, opts ...StreamOption
 	}
 	for _, opt := range opts {
 		opt(s)
+	}
+	if s.now == nil {
+		s.now = time.Now // 构造后兜底：任何 option 把时钟覆成 nil 都回退缺省（runtime#113）
 	}
 	return s
 }

@@ -123,3 +123,27 @@ func TestCapBytesNoBufferRetention(t *testing.T) {
 		t.Fatalf("超帽后缓冲应零滞留, got %d", s.Buffered())
 	}
 }
+
+// TestWithClockNilFallsBackToDefault 回归（runtime#113）：WithClock(nil) 不得把
+// 构造期已就位的缺省时钟覆盖成 nil——此前 nil 一路存进实例，首次 Offer 即以
+// nil 函数调用 SIGSEGV，而 godoc 承诺的是「缺省 time.Now」。口径对齐
+// oekit/pkg#356：nil 参数=显式回退默认值。
+func TestWithClockNilFallsBackToDefault(t *testing.T) {
+	// 构造期守卫：nil 不得落进实例（守卫失效时这里直接查出，而非等 Offer 炸）
+	s := NewStream(time.Hour, 1000, 1<<20, WithClock(nil))
+	if s.now == nil {
+		t.Fatal("WithClock(nil) 后实例时钟不得为 nil（应回退缺省 time.Now）")
+	}
+	// 行为护栏：WithClock(nil) 的 Offer/Flush 必须与不传 option 完全一致。
+	// 长窗下 Offer 只缓冲、Flush 落残尾，两路判定与时钟取值无关，可逐字比对。
+	def := NewStream(time.Hour, 1000, 1<<20)
+	dDef, okDef := def.Offer("残尾")
+	dNil, okNil := s.Offer("残尾")
+	if okDef != okNil || dDef != dNil {
+		t.Fatalf("WithClock(nil) 与缺省构造行为不一致：默认 ok=%v delta=%+v，nil ok=%v delta=%+v",
+			okDef, dDef, okNil, dNil)
+	}
+	if d, ok := s.Flush(); !ok || d.Text != "残尾" || d.Seq != 1 {
+		t.Fatalf("nil 回退缺省后 Flush 应正常落地，得到 ok=%v delta=%+v", ok, d)
+	}
+}
