@@ -40,16 +40,17 @@ type Stream struct {
 	now       func() time.Time
 }
 
-// Option Stream 可选项。
-type Option func(*Stream)
+// StreamOption Stream 可选项（runtime#110：AGENTS.md 明禁裸 Option——
+// 多包 co-import 时与其它包的 Option/WithClock 冲突；仓内其余三包均为 XxxOption）。
+type StreamOption func(*Stream)
 
 // WithClock 注入时钟（测试用；缺省 time.Now）。
-func WithClock(now func() time.Time) Option {
+func WithClock(now func() time.Time) StreamOption {
 	return func(s *Stream) { s.now = now }
 }
 
 // NewStream 构造；interval<=0 / bytes<=0 / capBytes<=0 取对应缺省值。
-func NewStream(interval time.Duration, bytes, capBytes int, opts ...Option) *Stream {
+func NewStream(interval time.Duration, bytes, capBytes int, opts ...StreamOption) *Stream {
 	if interval <= 0 {
 		interval = DefaultInterval
 	}
