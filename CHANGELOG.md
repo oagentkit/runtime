@@ -2,6 +2,55 @@
 
 > 本文件由 `matrix-tools/scripts/gen_changelogs.py` 从 git 历史生成，按 tag 切段、取每段内的 conventional commit 渲染。
 
+## [v0.13.0] — 2026-11-13
+
+### 修复(pacer)：WithClock(nil) 构造期回退缺省时钟——不再把 nil 存进实例远端 SIGSEGV（#113）
+
+- WithClock nil 直接 return：对齐 oekit/pkg cache.WithClock 的 pkg#356 修法
+  （nil 参数=显式回退默认值，godoc「缺省 time.Now」口径保住）
+- NewStream 构造后兜底 s.now==nil 回退 time.Now：防未来新增 option 再次覆掉缺省
+- 回归 TestWithClockNilFallsBackToDefault：构造期守卫断言 + 与不传 option
+  的 Offer/Flush 行为逐字比对（runtime#113）
+
+### 重构(pacer)!：导出 Option → StreamOption——AGENTS.md 明禁裸 Option（#110）
+
+仓内其余三包（NotifierOption/PollAckOption/ThrottlerOption）均为 XxxOption，
+pacer 是唯一漏项；裸 Option + WithClock 与 pkg/cache 等 dot-import 场景的
+同名冲突当下即发生（issue 内 probe 实证）。
+BREAKING CHANGE: pacer.Option 改名 StreamOption，WithClock/NewStream 签名
+同步更新。下游用别名一行适配：type Option = pacer.StreamOption。
+
+- 杂务(deps)：依赖地板追到最新——github.com/oekit/concurrency v0.35.0
+
+| 依赖 | 现地板 | 抬到 |
+|---|---|---|
+| `github.com/oekit/concurrency` | `v0.34.0` | `v0.35.0` |
+| `github.com/oekit/pkg` | `v0.46.0` | `v0.47.1` |
+## 为什么
+矩阵的**发版时刻地板时效**门禁（`verify_tag_floor --ref HEAD`）要求：各仓 HEAD
+（= 下次发版会发出去的内容）的依赖地板，相对那一刻的依赖最新版本，不能已落后。
+oekit 基座与矩阵模块都在高频发版 ⇒ 地板是**跑步机**，落后一格就会判红。
+## 兼容性实测
+本工具在提交前跑完 `go build` / `go vet` / `go test -race -count=1 ./...`（全绿才提交）
+与 `go mod tidy -diff`（无漂移）⇒ 改动**只影响依赖版本**，零行为差异。
+只改 `go.mod` / `go.sum` ⇒ 不需要 CHANGELOG 条目（版本段由下次发版的 `prewrite` 生成）。
+
+- 杂务(deps)：依赖地板追到最新——concurrency v0.34.0 + pkg v0.46.0（#211）
+
+| 依赖 | 现地板 | 抬到 |
+|---|---|---|
+| github.com/oekit/concurrency | v0.33.0 | v0.34.0 |
+| github.com/oekit/pkg | v0.45.0 | v0.46.0 |
+procx 依赖地板白名单随合同放行 oekit/pkg：concurrency v0.34.0 的 async
+panic 收编消费 pkg/errors，procx 闭包新增第一方基座 pkg（depsfloor_test
+白名单两基座化 + README 两处同步）。ci.yml go-version 已是 1.26（v0.45 bump
+时同步过），无需再动。
+
+- 杂务(deps)：依赖地板追到最新——github.com/oekit/pkg v0.45.0
+
+ci: go-version 1.24 → 1.26——go 指令已被 oekit/pkg v0.45.0 顶至 1.26.0，薄调用层同步（matrix-tools#210）
+
+
 ## [v0.12.9] — 2026-11-12
 
 - 杂务(modernize)：sort.* → slices.*/min-max 内建——吃 Go 1.21+ 标准库，零行为变化
