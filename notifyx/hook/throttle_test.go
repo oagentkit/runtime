@@ -106,6 +106,53 @@ func TestWithThrottleDirEmptyKeepsDefault(t *testing.T) {
 	}
 }
 
+// TestThrottlerSweepsStaleStamps 回归（runtime#126）：状态文件每
+// agent×session×event 一个 .stamp，此前只增不删。Allow 写入后应删除 mtime
+// 早于窗口的 .stamp；窗口内的、以及非 .stamp 文件必须保留。
+func TestThrottlerSweepsStaleStamps(t *testing.T) {
+	dir := t.TempDir()
+	const window = time.Minute
+	th := NewThrottler(WithThrottleDir(dir), WithThrottleWindow(window))
+
+	writeWithMtime := func(name string, mtime time.Time) string {
+		t.Helper()
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte(strconv.FormatInt(mtime.UnixNano(), 10)), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(p, mtime, mtime); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	now := time.Now()
+	stale := writeWithMtime(throttleKey("cc", "s-old", "task_complete")+".stamp", now.Add(-2*window))
+	fresh := writeWithMtime(throttleKey("kimi", "s-new", "task_complete")+".stamp", now)
+	nonStamp := writeWithMtime("keep.txt", now.Add(-2*window))
+
+	// 惰性：Allow 之前不动目录。
+	if _, err := os.Stat(stale); err != nil {
+		t.Fatalf("清扫应在 Allow 内惰性发生，此前文件应存在: %v", err)
+	}
+	allowed, err := th.Allow("zcode", "s", "task_complete")
+	if err != nil || !allowed {
+		t.Fatalf("首调应放行且无错误: allowed=%v err=%v", allowed, err)
+	}
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Fatalf("窗口外的 .stamp 应被清扫，stat err=%v", err)
+	}
+	if _, err := os.Stat(fresh); err != nil {
+		t.Fatalf("窗口内的 .stamp 不得被清扫: %v", err)
+	}
+	if _, err := os.Stat(nonStamp); err != nil {
+		t.Fatalf("非 .stamp 文件不得被清扫: %v", err)
+	}
+	// 清扫不得影响当前键的节流判定。
+	if allowed, err := th.Allow("zcode", "s", "task_complete"); allowed || err != nil {
+		t.Fatalf("窗口内二调应拦截且无错误: allowed=%v err=%v", allowed, err)
+	}
+}
+
 // fail-open 纪律：状态文件损坏按过期处理；目录不可写仍放行并带出错误。
 func TestThrottlerFailOpen(t *testing.T) {
 	dir := t.TempDir()

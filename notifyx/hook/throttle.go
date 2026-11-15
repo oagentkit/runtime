@@ -3,6 +3,7 @@ package hook
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -22,6 +23,11 @@ const DefaultThrottleWindow = 5 * time.Second
 // 双双放行（读-判-写非原子），这对通知场景可接受——fail-open 是本类型的
 // 总纪律：状态文件读不了/写不进一律放行（宁可重发通知，不可吞掉
 // 「等人工」事件），错误带回给调用方观测。
+//
+// 状态文件的生命周期（runtime#126）：键含 sessionID ⇒ 每会话一文件，长跑
+// 宿主会持续累积。Allow 在成功写入当前键后做一次惰性清扫：删掉 mtime 早于
+// 窗口的 .stamp——窗口外的键本就不再判中，留着只会无界增长。清扫失败不影响
+// 本次放行（已在放行路径上），错误随返回值带回观测。
 type Throttler struct {
 	window time.Duration
 	dir    string
@@ -95,7 +101,41 @@ func (t *Throttler) Allow(agent, sessionID, event string) (bool, error) {
 	if err := os.WriteFile(path, []byte(strconv.FormatInt(now.UnixNano(), 10)), 0o600); err != nil {
 		return true, fmt.Errorf("notifyx/hook: 节流状态写入失败: %w", err)
 	}
+	// 当前键已落盘且放行；顺手清扫过期状态（runtime#126）。清扫失败仍放行，
+	// 错误带回给调用方——清扫是资源卫生，不是判定的一部分。
+	if err := t.sweepStale(now); err != nil {
+		return true, fmt.Errorf("notifyx/hook: 节流状态清扫失败: %w", err)
+	}
 	return true, nil
+}
+
+// sweepStale 惰性清扫窗口外的状态文件（runtime#126）：只处理本目录顶层的
+// .stamp 文件，mtime 早于窗口（含未来时间戳的时钟回拨场景一律保留）的被删除。
+// 删除按 mtime 判定而不是读内容：窗口外的键本就不再判中，读内容只是多一次
+// 解析；并发进程同时清扫也安全（Remove 竞态按 not-exist 忽略）。
+func (t *Throttler) sweepStale(now time.Time) error {
+	entries, err := os.ReadDir(t.dir)
+	if err != nil {
+		return err
+	}
+	var errs []error
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".stamp") {
+			continue
+		}
+		info, ierr := entry.Info()
+		if ierr != nil {
+			errs = append(errs, ierr)
+			continue
+		}
+		if now.Sub(info.ModTime()) <= t.window {
+			continue // 窗口内（或 mtime 在未来）：仍可能判中，保留
+		}
+		if rerr := os.Remove(filepath.Join(t.dir, entry.Name())); rerr != nil && !os.IsNotExist(rerr) {
+			errs = append(errs, rerr)
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // throttleKey 键哈希成文件名：维度直接拼原文可能带路径分隔符/超长，
