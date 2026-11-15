@@ -58,6 +58,36 @@ func TestBusNilSafe(t *testing.T) {
 	b.Publish(testEvent{Type: "x"}) // 不应 panic
 }
 
+// TestNilBusSubscribeReturnsClosedChannel 回归（runtime#125）：nil Bus 的
+// Subscribe 曾返回 nil channel——`for range ch` 对 nil channel 是永久阻塞，
+// 消费方按正常路径的 range 写法就会挂死，而 no-op cancel 无法唤醒。
+// 修复后返回已关闭的空 channel：range 立即退出，取值为零值 + ok=false。
+func TestNilBusSubscribeReturnsClosedChannel(t *testing.T) {
+	var b *Bus[testEvent]
+	ch, cancel := b.Subscribe(context.Background())
+	if ch == nil {
+		t.Fatal("nil Bus 的 Subscribe 不得返回 nil channel（range 会永久阻塞）")
+	}
+	cancel() // no-op，重复调用也不得 panic
+	cancel()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for range ch { // 唯一退出路径：channel 已关闭
+			t.Error("已关闭的空 channel 不应产出任何事件")
+		}
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("nil Bus 的 range 未退出——channel 未关闭")
+	}
+	if v, ok := <-ch; ok {
+		t.Fatalf("已关闭 channel 应给 ok=false，实得 %+v", v)
+	}
+}
+
 func TestSubscribeCtxCleanup(t *testing.T) {
 	b := NewBus[testEvent]()
 	ctx, cancel := context.WithCancel(context.Background())

@@ -49,8 +49,10 @@ func (b *Bus[T]) Publish(e T) {
 }
 
 // Subscribe 注册订阅者；返回取消函数（ctx 结束也会自动取消）。
-// nil Bus 安全：返回永不产出的 nil channel 与 no-op cancel（与 Publish/Dropped
-// 同一 nil 契约）。
+// nil Bus 安全：返回**已关闭**的空 channel 与 no-op cancel（与 Publish/Dropped
+// 同一 nil 契约）。「永不产出」以「空即关」兑现——此前返回 nil channel 时，
+// `for range ch` 会永久阻塞（range nil channel 是等待，不是立即返回），
+// 而 no-op cancel 救不了已挂死的消费方（runtime#125）。
 // cancel 与 ctx 结束双向收口：任一发生，监听 goroutine 都会退出——
 // 此前手动 cancel 只删 channel 不唤醒监听 goroutine，ctx 为 Background 时
 // 每个订阅者永久泄漏一个 goroutine + 一条残留 channel。
@@ -67,7 +69,12 @@ func (b *Bus[T]) Publish(e T) {
 // 循环会空转——这是 Go 里所有可关闭 channel 的通用前提，不是本包的额外要求。
 func (b *Bus[T]) Subscribe(ctx context.Context) (<-chan T, func()) {
 	if b == nil {
-		return nil, func() {}
+		// 已关闭的空 channel：语义与正常路径「close 后 range 退出」一致。
+		// nil channel 不是「永不产出」，而是「永远等下去」——range 形态的
+		// 消费方按文档写法就会挂死（runtime#125）。
+		ch := make(chan T)
+		close(ch)
+		return ch, func() {}
 	}
 	ch := make(chan T, 64)
 	b.mu.Lock()

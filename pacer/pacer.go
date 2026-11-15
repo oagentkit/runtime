@@ -7,7 +7,10 @@
 // 不阻塞不并发），故不加锁；跨 goroutine 使用由调用方自行串行化。
 package pacer
 
-import "time"
+import (
+	"time"
+	"unicode/utf8"
+)
 
 const (
 	// DefaultInterval 缺省时间窗。
@@ -103,15 +106,50 @@ func (s *Stream) Offer(chunk string) (Delta, bool) {
 	return s.Flush()
 }
 
-// Flush 立即发布缓冲残尾（帽内）；空缓冲/已收口/超帽不动序号。
+// Flush 立即发布缓冲残尾（钳制在剩余额度内，单次发布不越 capBytes 总量帽）；
+// 空缓冲/已收口/超帽不动序号。
+//
+// runtime#124：旧实现只以「发布前 published >= capBytes」判帽，残尾按全量发布
+// ——published=capBytes-100 时缓冲 200 字节会一次把总量顶到 capBytes+100，
+// 单个巨大 chunk 更能一举越过整条帽。「超帽静默停发」只拦得出**下一次** Offer，
+// 与包头/DefaultCapBytes/本注释三处「总量帽内」的承诺相悖。
+// 截断按字节额度（与 capBytes/DefaultBytes 口径一致），但起点回退到 rune 边界：
+// 帽不是非法 UTF-8 的许可证。
 func (s *Stream) Flush() (Delta, bool) {
 	if s.done || s.text == "" || s.published >= s.capBytes {
 		return Delta{}, false
 	}
-	pub := Delta{Seq: s.seq + 1, Text: s.text}
+	text := s.text
+	if remaining := s.capBytes - s.published; len(text) > remaining {
+		text = clampRunes(text, remaining)
+		if text == "" {
+			// 剩余额度容不下首个 rune：帽已实质到顶，清缓冲并按超帽停发，
+			// 避免迟到的分片在 Flush 里滞留（同 Offer 前置判定的内存纪律）。
+			s.text = ""
+			s.published = s.capBytes
+			return Delta{}, false
+		}
+	}
+	pub := Delta{Seq: s.seq + 1, Text: text}
 	s.seq, s.text, s.flushedAt = pub.Seq, "", s.now()
 	s.published += len(pub.Text)
 	return pub, true
+}
+
+// clampRunes 把 s 截到至多 maxBytes 字节，切口回退到 rune 起点（不劈开
+// 多字节字符）。maxBytes<=0 或首 rune 本身就超额度时返回空串。
+func clampRunes(s string, maxBytes int) string {
+	if maxBytes <= 0 {
+		return ""
+	}
+	if len(s) <= maxBytes {
+		return s
+	}
+	cut := maxBytes
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut]
 }
 
 // Absorb 权威快照到达：增量缓冲作废并收口（消费方以权威整段替换增量累积）。

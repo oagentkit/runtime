@@ -1,6 +1,7 @@
 package notifyx
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -39,6 +40,12 @@ const DefaultAckFetchTimeout = 10 * time.Second
 // HTTPAckEndpoint 轮询端点的 HTTP 形态：GET {baseURL}?session_id=...，
 // 响应体兼容两种形态——顶层 JSON null、或 {"ack": null|{...}}（octopus
 // 的 ack != null 取回结果 / ack = null 继续等）。4xx/5xx 返回错误。
+//
+// 两种形态之外的对象一律返回错误，**不得**当作「暂无回执」（runtime#127）：
+// 裸 Ack（{"decision":"approve",...}，无 ack 包裹）解码后 envelope.Ack 为 nil，
+// 旧实现按 (nil, nil) 返回 ⇒ PollAck 重置连续失败计数，把「契约不符」伪装成
+// 「还没等到」，一直空转到 ackTimeout。形态不属于契约是**拉取失败**，应走
+// error 路径（计入连续失败、超限后快速失败）。
 func HTTPAckEndpoint(baseURL string) AckEndpoint {
 	return func(ctx context.Context, sessionID string) (*Ack, error) {
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL, nil)
@@ -62,14 +69,38 @@ func HTTPAckEndpoint(baseURL string) AckEndpoint {
 			snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
 			return nil, fmt.Errorf("notifyx: ack 端点返回 %s，body 尾部: %.256s", resp.Status, snippet)
 		}
-		// {"ack": null|{...}} 形态；顶层 null 解码为全零结构体 → 同样得 nil ack
-		var envelope struct {
-			Ack *Ack `json:"ack"`
-		}
-		if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
+		// 先收成 RawMessage，按「顶层 null / 含 ack 键的对象 / 其余」三态分支：
+		// 直接解码进 struct 无法区分「无 ack 键」与「ack: null」，裸 Ack 会
+		// 静默落进 nil ack（runtime#127）。
+		var raw json.RawMessage
+		if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
 			return nil, fmt.Errorf("notifyx: ack 响应非 JSON: %w", err)
 		}
-		return envelope.Ack, nil
+		raw = bytes.TrimSpace(raw)
+		if bytes.Equal(raw, []byte("null")) {
+			return nil, nil // 顶层 null：暂无回执（文档形态）
+		}
+		if len(raw) == 0 || raw[0] != '{' {
+			return nil, fmt.Errorf("notifyx: ack 响应形态不在契约内（期望顶层 null 或含 ack 字段的对象，实得 %.64s）", raw)
+		}
+		var envelope struct {
+			Ack json.RawMessage `json:"ack"`
+		}
+		if err := json.Unmarshal(raw, &envelope); err != nil {
+			return nil, fmt.Errorf("notifyx: ack 响应不是合法对象: %w", err)
+		}
+		if envelope.Ack == nil {
+			return nil, fmt.Errorf("notifyx: ack 响应形态不在契约内（缺少 ack 字段，实得 %.64s）", raw)
+		}
+		ackRaw := bytes.TrimSpace(envelope.Ack)
+		if bytes.Equal(ackRaw, []byte("null")) {
+			return nil, nil // {"ack": null}：暂无回执（文档形态）
+		}
+		var ack Ack
+		if err := json.Unmarshal(ackRaw, &ack); err != nil {
+			return nil, fmt.Errorf("notifyx: ack 字段不是对象: %w", err)
+		}
+		return &ack, nil
 	}
 }
 

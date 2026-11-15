@@ -3,8 +3,10 @@ package procx
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 // TestClassifyWaitLocalDeadlineBeatsLateCancel 回归（runtime#63）：本地 Timeout
@@ -68,15 +70,50 @@ func TestClassifyWaitPlainCancelUnchanged(t *testing.T) {
 	}
 }
 
-// TestClassifyWaitPlainFailureUnchanged 两个 ctx 都干净的非零退出：不带任何
-// sentinel（普通失败语义不受本次改动影响）。
-func TestClassifyWaitPlainFailureUnchanged(t *testing.T) {
+// TestClassifyWaitTailStartsAtRuneBoundary 回归（runtime#123）：stderr 尾巴
+// 按字节切 `tail[len(tail)-400:]` 会腰斩 UTF-8——600 字节中文的切点落在
+// 汉字中间，错误文案开头是半个字符。按 rune 回退后整条消息必须是合法 UTF-8，
+// 且尾部只剩完整汉字。
+func TestClassifyWaitTailStartsAtRuneBoundary(t *testing.T) {
+	errBuf := newCappedBuffer(0)
+	if _, err := errBuf.Write([]byte(strings.Repeat("中", 200))); err != nil { // 600 字节
+		t.Fatal(err)
+	}
 	ctx := context.Background()
 	cctx, cancel := context.WithTimeout(ctx, time.Minute)
 	defer cancel()
 
-	err := classifyWait(ctx, cctx, "cmd", errors.New("exit status 1"), newCappedBuffer(0), time.Minute)
-	if errors.Is(err, ErrTimeout) || errors.Is(err, ErrCanceled) {
-		t.Fatalf("普通失败不得命中 sentinel: %v", err)
+	err := classifyWait(ctx, cctx, "cmd", errors.New("exit status 1"), errBuf, time.Minute)
+	msg := err.Error()
+	if !utf8.ValidString(msg) {
+		t.Fatalf("错误文案含非法 UTF-8（按字节腰斩）: %q", msg)
+	}
+	const sep = ": exit status 1: "
+	i := strings.Index(msg, sep)
+	if i < 0 {
+		t.Fatalf("错误文案缺少 stderr 尾巴分隔符: %q", msg)
+	}
+	tail := msg[i+len(sep):]
+	if len(tail) == 0 || len(tail) > 400 {
+		t.Fatalf("尾巴长度应在 (0,400] 字节内，实得 %d", len(tail))
+	}
+	if strings.Trim(tail, "中") != "" {
+		t.Fatalf("rune 边界回退后应只剩完整汉字，实得 %q", tail)
+	}
+}
+
+// TestTailSnippetShortUnchanged 负对照：不超过上限的尾巴原样返回。
+func TestTailSnippetShortUnchanged(t *testing.T) {
+	const s = "短错误"
+	if got := tailSnippet(s, 400); got != s {
+		t.Fatalf("未超上限应原样返回，实得 %q", got)
+	}
+	if got := tailSnippet(s, 0); got != "" {
+		t.Fatalf("limit<=0 应返回空串，实得 %q", got)
+	}
+	// ASCII 恰好落在 400 字节边界时也必须完整。
+	ascii := strings.Repeat("a", 401)
+	if got := tailSnippet(ascii, 400); got != ascii[1:] {
+		t.Fatalf("ASCII 尾巴应为最后 400 字节，实得长度 %d", len(got))
 	}
 }

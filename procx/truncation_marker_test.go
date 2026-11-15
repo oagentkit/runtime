@@ -122,6 +122,43 @@ func TestStderrTruncationMarked(t *testing.T) {
 	if !truncMarker(stderr) {
 		t.Fatalf("stderr 超 8MB 上限必须带标记，否则被裁剪的 stderr 会被当成全量")
 	}
+	if !strings.Contains(stderr, "stderr 超过") || strings.Contains(stderr, "stdout 超过") {
+		// runtime#122：留痕必须指向**实际**被截断的流，否则排障被引到 stdout。
+		t.Fatalf("stderr 截断留痕应写 stderr 流名，实得尾部: %q", stderr[max(0, len(stderr)-80):])
+	}
+}
+
+// TestNoteTruncatedNamesActualStream 回归（runtime#122）：noteTruncated 的文案
+// 必须带实际流名。此前 stderr 复用同一函数、文案写死 stdout，stderr 超限时
+// 结尾写「stdout 超过 N 字节上限」——与结构化字段 StderrTruncated 互相打脸，
+// 排障者去查错的采集配置。
+//
+// 直接构造 truncated 缓冲（不写 8MB），逐流断言文案。
+func TestNoteTruncatedNamesActualStream(t *testing.T) {
+	cases := []struct {
+		stream     string
+		maxStdout  int
+		wantPhrase string
+		notPhrase  string
+	}{
+		{"stdout", 4096, "stdout 超过 4096 字节上限", "stderr 超过"},
+		{"stderr", 0, "stderr 超过 8388608 字节上限", "stdout 超过"}, // 0 = maxChildStdout 缺省
+	}
+	for _, tc := range cases {
+		buf := newCappedBuffer(tc.maxStdout)
+		buf.truncated = true
+		got := noteTruncated("payload", buf, tc.maxStdout, tc.stream)
+		if !strings.Contains(got, tc.wantPhrase) {
+			t.Errorf("流名 %s 的留痕应含 %q，实得 %q", tc.stream, tc.wantPhrase, got)
+		}
+		if strings.Contains(got, tc.notPhrase) {
+			t.Errorf("流名 %s 的留痕不得出现另一条流 %q，实得 %q", tc.stream, tc.notPhrase, got)
+		}
+	}
+	// 未截断一律原样返回（负对照：文案不得无条件追加）。
+	if got := noteTruncated("clean", newCappedBuffer(0), 0, "stderr"); got != "clean" {
+		t.Errorf("未截断应原样返回，实得 %q", got)
+	}
 }
 
 // TestSuccessPathStillMarked 回归：成功路径的既有行为不改。

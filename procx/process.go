@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // maxChildStdout 子进程 stdout 采集上限（异常命令刷屏防内存放大）。
@@ -118,8 +119,8 @@ func execCLI(ctx context.Context, dir string, argv []string, env []string,
 	// 截断**事实**同步透出（procx#92）：cappedBuffer.truncated 是唯一事实源，
 	// 尾部人读留痕与结构化布尔同源于它——文案只是排障面，不再是机器契约。
 	res := RunResult{
-		Stdout:          noteTruncated(outBuf.buf.String(), outBuf, maxStdout),
-		Stderr:          noteTruncated(errBuf.buf.String(), errBuf, 0),
+		Stdout:          noteTruncated(outBuf.buf.String(), outBuf, maxStdout, "stdout"),
+		Stderr:          noteTruncated(errBuf.buf.String(), errBuf, 0, "stderr"),
 		StdoutTruncated: outBuf.truncated,
 		StderrTruncated: errBuf.truncated,
 	}
@@ -206,10 +207,7 @@ func startAndWait(cmd *exec.Cmd, stdin []byte, group processGroup, name string) 
 
 // classifyWait 把 Wait 错误翻译成调用方可 errors.Is 的语义（取消/超时/失败+stderr 尾巴）。
 func classifyWait(ctx, cctx context.Context, name string, waitErr error, errBuf *cappedBuffer, timeout time.Duration) error {
-	tail := errBuf.buf.String()
-	if len(tail) > 400 {
-		tail = tail[len(tail)-400:]
-	}
+	tail := tailSnippet(errBuf.buf.String(), 400)
 	switch {
 	// 本地 Timeout 先判（runtime#63）：调用方恰在本地超时落定之后才 cancel
 	// 时，ctx.Err() 与本地 deadline 同时非 nil，真实超时必须报 ErrTimeout——
@@ -241,8 +239,32 @@ func localDeadlineFired(ctx, cctx context.Context) bool {
 	return !ok || parentDeadline.After(cctxDeadline)
 }
 
-// noteTruncated 超限截断时在 stdout 尾部留痕（调用方可见「有内容被丢」）。
-func noteTruncated(out string, outBuf *cappedBuffer, maxStdout int) string {
+// tailSnippet 取字符串尾部至多 limit 字节，起点回退到 rune 边界（runtime#123）。
+//
+// 直接按字节切 `s[len(s)-limit:]` 会腰斩 UTF-8 多字节字符——本仓错误文化
+// 全中文，stderr 超 400 字节时切点落在汉字中间是常态。半个字符进错误文案后
+// utf8.ValidString 都过不了，下游日志/JSON 序列化拿到坏数据（对齐 oekit/pkg#419
+// 与 agent#57 的判词）。回退只会让尾巴更短（最多少一个 rune），不会越过 limit。
+func tailSnippet(s string, limit int) string {
+	if limit <= 0 {
+		return ""
+	}
+	if len(s) <= limit {
+		return s
+	}
+	cut := len(s) - limit
+	// cut < len(s) 恒成立（len(s) > limit）；utf8.RuneStart 对非法字节也返回
+	// true（非 10xxxxxx 续字节），故不会越过一个坏序列继续回退。
+	for cut < len(s) && !utf8.RuneStart(s[cut]) {
+		cut++
+	}
+	return s[cut:]
+}
+
+// noteTruncated 超限截断时在对应流尾部留痕（调用方可见「有内容被丢」）。
+// stream 是实际被截断的流名（"stdout"/"stderr"，runtime#122）：stderr 复用了
+// 同一函数后文案曾把流名写死成 stdout，排障者被指向错误的采集配置。
+func noteTruncated(out string, outBuf *cappedBuffer, maxStdout int, stream string) string {
 	if !outBuf.truncated {
 		return out
 	}
@@ -250,7 +272,7 @@ func noteTruncated(out string, outBuf *cappedBuffer, maxStdout int) string {
 	if limit <= 0 {
 		limit = maxChildStdout
 	}
-	return out + fmt.Sprintf("\n…（stdout 超过 %d 字节上限，已截断）", limit)
+	return out + fmt.Sprintf("\n…（%s 超过 %d 字节上限，已截断）", stream, limit)
 }
 
 // RunRequest 独立进程执行请求：只要进程组托管纪律的调用方使用
