@@ -4,4 +4,4 @@ go 1.26.0
 
 require github.com/oekit/concurrency v0.40.0
 
-require github.com/oekit/pkg v0.58.0
+require github.com/oekit/pkg v0.58.2
