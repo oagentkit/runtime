@@ -24,7 +24,8 @@
 // 不再等于「无意见」，而是落一条**保守判定**（阻断 + 权限 deny）（hookx#34）。
 // Stop 是例外，见 failClosedResult 的说明。
 //
-// 子进程环境走 procx.ChildEnv 白名单（绝不继承全量密钥）。
+// 子进程环境走 procx.ChildEnv 白名单（绝不继承全量密钥；单源
+// oekit/pkg/procx——本仓 procx 已是兼容壳，hookx 直接消费单源）。
 package hookx
 
 import (
@@ -35,7 +36,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/oagentkit/runtime/procx"
+	pkgprocx "github.com/oekit/pkg/procx"
 	"github.com/oekit/pkg/cache"
 )
 
@@ -253,14 +254,14 @@ func runHook(ctx context.Context, h Hook, payload Input) (*Output, error) {
 	if err != nil {
 		return nil, err
 	}
-	stdout, _, _, perr := procx.Run(ctx, procx.RunRequest{
+	res, perr := pkgprocx.RunDetailed(ctx, pkgprocx.RunRequest{
 		Argv:      h.Command,
 		Env:       h.Env,
 		Timeout:   timeout,
 		MaxStdout: maxStdout,
 		Stdin:     payloadJSON,
 	})
-	raw := strings.TrimSpace(stdout)
+	raw := strings.TrimSpace(res.Stdout)
 	if perr != nil {
 		// 执行失败 ≠ 决策未说（runtime#69）：hook 打印决策 JSON **之后**才非零
 		// 退出（决策后内部出错 / `set -e` 后置检查 / 包装器附诊断）是真实世界的
