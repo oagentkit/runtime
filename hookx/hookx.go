@@ -36,8 +36,8 @@ import (
 	"strings"
 	"time"
 
-	pkgprocx "github.com/oekit/pkg/procx"
 	"github.com/oekit/pkg/cache"
+	pkgprocx "github.com/oekit/pkg/procx"
 )
 
 // DefaultTimeout 单 hook 执行预算（对标 ZCode 60s）。
