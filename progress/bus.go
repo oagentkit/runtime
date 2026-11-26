@@ -67,6 +67,12 @@ func (b *Bus[T]) Publish(e T) {
 // ⚠️ 消费方契约随之改变：select 消费必须检查 ok（`v, ok := <-ch`）。
 // 关闭后该 case 恒可就绪并反复给出零值，写 `case v := <-ch:` 而不查 ok 的
 // 循环会空转——这是 Go 里所有可关闭 channel 的通用前提，不是本包的额外要求。
+// 反向分叉声明（oagentkit/goagent-kernel#506 裁决，2026-11-26）：下游
+// goagent-kernel/eventbus 的 **Hub** 有意不跟本包的「退订即 close」——
+// Hub 按会话键控（内核看不见宿主 SSE 循环有没有查 ok），close 与否由
+// 宿主循环形态决定，该分叉在 kernel/eventbus/hub.go 成文并有测试对钉。
+// 本包（Bus）与 kernel/eventbus/bus 的裸扇出面**已收敛**（同 close 契约、
+// 同缓冲语义）；真正保持分叉的只有 Hub 形态。声明成文即结案，不收编。
 func (b *Bus[T]) Subscribe(ctx context.Context) (<-chan T, func()) {
 	if b == nil {
 		// 已关闭的空 channel：语义与正常路径「close 后 range 退出」一致。
