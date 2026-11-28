@@ -33,4 +33,6 @@
 // 网络挂了不丢确认请求、队列满按序丢弃（计数可见）。「等人工」事件的确认
 // 回执走 AckEndpoint + PollAck（octopus 侧轮询端点契约同源：ack != null
 // 取回结果 / ack = null 继续等）。
+//
+// 生命周期: Experimental——未过一个 minor 无 breaking 窗口（api-compat.md 晋级条件一），初值不承诺兼容
 package notifyx

@@ -14,6 +14,8 @@
 //
 // 弃用时间表：与 agentkit 门面同款——compatShells 登记，待外部消费方迁移
 // 列车完成后删除本包。
+//
+// 生命周期: Experimental——未过一个 minor 无 breaking 窗口（api-compat.md 晋级条件一），初值不承诺兼容
 package procx
 
 import (

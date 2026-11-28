@@ -1,6 +1,8 @@
 // Package progress 泛型事件总线。
 // 多订阅者广播，每个订阅者 64 缓冲，满了就丢（观测数据允许有损）。
 // 发布永不阻塞（订阅者慢不拖慢主链路）。
+//
+// 生命周期: Experimental——未过一个 minor 无 breaking 窗口（api-compat.md 晋级条件一），初值不承诺兼容
 package progress
 
 import (
