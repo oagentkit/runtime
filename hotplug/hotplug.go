@@ -1,6 +1,8 @@
 // Package hotplug 运行时插拔与原子热替换：启停视图（Plugboard）+ 泛型快照持有点（Holder）。
 // 适用「文件管定义、页面管状态」的可插拔组件——reload/启停构建新快照后整体 Store，
 // 运行中请求继续用旧快照跑完，新请求即时用新快照。
+//
+// 生命周期: Experimental——未过一个 minor 无 breaking 窗口（api-compat.md 晋级条件一），初值不承诺兼容
 package hotplug
 
 import (

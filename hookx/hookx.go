@@ -44,6 +44,8 @@
 // hookengine 面向宿主自装检查（缺检查=漏配置 ⇒ 缺省闭），本包面向扩展点
 // （扩展故障不阻断业务 ⇒ 缺省开、安全事件经 FailClosedEvents 选配收紧）。
 // 重审触发：任一侧出现第二个生产消费方，或本包被要求支持工具维匹配。
+//
+// 生命周期: Experimental——未过一个 minor 无 breaking 窗口（api-compat.md 晋级条件一），初值不承诺兼容
 package hookx
 
 import (

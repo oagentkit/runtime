@@ -5,6 +5,8 @@
 //
 // 单 goroutine 契约：与消费方事件回调同一约束面（回调在 drain 循环内同步执行，
 // 不阻塞不并发），故不加锁；跨 goroutine 使用由调用方自行串行化。
+//
+// 生命周期: Experimental——未过一个 minor 无 breaking 窗口（api-compat.md 晋级条件一），初值不承诺兼容
 package pacer
 
 import (

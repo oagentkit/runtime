@@ -45,4 +45,6 @@
 //
 // 本包不另做轮询实现：CLI 直接组合主包的 PollAck + HTTPAckEndpoint，
 // 缺省参数与 PollAck 同款（间隔 2s、连续失败上限 5）。
+//
+// 生命周期: Experimental——未过一个 minor 无 breaking 窗口（api-compat.md 晋级条件一），初值不承诺兼容
 package hook
